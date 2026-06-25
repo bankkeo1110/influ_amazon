@@ -42,40 +42,42 @@ export default function HomePage() {
   }, [fetchPosts]);
 
   return (
-    <div className="mx-auto min-h-screen max-w-md bg-shuttle-line pb-24">
+    <div className="mx-auto min-h-screen max-w-6xl bg-shuttle-line pb-24">
       {/* Header */}
-      <header className="sticky top-0 z-30 border-b border-court/10 bg-white/90 px-4 py-3 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-court/10 bg-white/90 px-6 py-3 backdrop-blur">
         <div className="flex items-center justify-between">
           <h1 className="font-display text-base font-bold text-court-dark">
             🏸 BadmintonDN
           </h1>
           <span className="text-xs text-ink/40">Đà Nẵng</span>
         </div>
-        <div className="mt-2 flex gap-1.5">
-          {TABS.map((t) => (
-            <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
-              className={`rounded-md px-3 py-1 text-xs font-medium ${
-                tab === t.key
-                  ? "bg-court-light text-court-dark"
-                  : "text-ink/50 hover:bg-shuttle-line"
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+        <div className="mt-2 flex items-center gap-3">
+          <div className="flex gap-1.5">
+            {TABS.map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setTab(t.key)}
+                className={`rounded-md px-3 py-1 text-xs font-medium ${
+                  tab === t.key
+                    ? "bg-court-light text-court-dark"
+                    : "text-ink/50 hover:bg-shuttle-line"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <input
+            className="flex-1 max-w-sm"
+            placeholder="Tìm theo sân, khu vực..."
+            value={search}
+            onChange={(e) => handleSearchChange(e.target.value)}
+          />
         </div>
-        <input
-          className="mt-2 w-full"
-          placeholder="Tìm theo sân, khu vực..."
-          value={search}
-          onChange={(e) => handleSearchChange(e.target.value)}
-        />
       </header>
 
       {/* Feed */}
-      <main className="space-y-3 p-4">
+      <main className="p-6">
         {loading ? (
           <p className="py-10 text-center text-sm text-ink/40">Đang tải...</p>
         ) : posts.length === 0 ? (
@@ -86,14 +88,16 @@ export default function HomePage() {
             </p>
           </div>
         ) : (
-          posts.map((p) => <PostCard key={p.id} post={p} />)
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {posts.map((p) => <PostCard key={p.id} post={p} />)}
+          </div>
         )}
       </main>
 
       {/* FAB */}
       <button
         onClick={() => setShowModal(true)}
-        className="fixed bottom-6 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full bg-court px-5 py-3 text-sm font-medium text-white shadow-lg hover:bg-court-dark"
+        className="fixed bottom-6 right-8 z-30 flex items-center gap-2 rounded-full bg-court px-5 py-3 text-sm font-medium text-white shadow-lg hover:bg-court-dark"
       >
         <span className="text-base leading-none">+</span> Đăng bài
       </button>

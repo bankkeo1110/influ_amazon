@@ -21,7 +21,7 @@ export default function PostCard({ post }: { post: Post }) {
   const isPartner = post.type === "FIND_PARTNER";
 
   return (
-    <div className="rounded-xl2 border border-court/10 bg-white p-4 shadow-sm transition hover:shadow-md">
+    <div className="flex flex-col rounded-xl2 border border-court/10 bg-white p-4 shadow-sm transition hover:shadow-md">
       <div className="mb-2 flex items-center justify-between">
         <span
           className={`rounded-md px-2 py-0.5 text-xs font-medium ${TYPE_COLORS[post.type]}`}
@@ -64,7 +64,7 @@ export default function PostCard({ post }: { post: Post }) {
         </p>
       )}
 
-      <div className="mt-3 flex items-center justify-between border-t border-court/10 pt-3">
+      <div className="mt-auto pt-3 flex items-center justify-between border-t border-court/10">
         <span className="text-xs text-ink/50">
           {STATUS_LABELS[post.status]}
         </span>
