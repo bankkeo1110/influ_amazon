@@ -34,6 +34,28 @@ enum PostStatus {
   CLOSED
 }
 
+model ProductSearch {
+  id          String         @id @default(cuid())
+  productName String
+  createdAt   DateTime       @default(now())
+  videos      YoutubeVideo[]
+}
+
+model YoutubeVideo {
+  id              String        @id @default(cuid())
+  videoId         String
+  title           String
+  description     String        @db.Text
+  thumbnailUrl    String
+  channelTitle    String
+  publishedAt     String
+  viewCount       String?
+  hasAffiliate    Boolean       @default(false)
+  productSearchId String
+  productSearch   ProductSearch @relation(fields: [productSearchId], references: [id], onDelete: Cascade)
+  createdAt       DateTime      @default(now())
+}
+
 model Post {
   id             String     @id @default(cuid())
   type           PostType
