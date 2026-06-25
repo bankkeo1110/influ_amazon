@@ -1,0 +1,56 @@
+// Prisma schema
+// Dev: SQLite (file-based, zero setup)
+// Prod (free host): swap provider to "postgresql" and set DATABASE_URL
+// to a free Postgres instance (Neon, Supabase, Railway) — SQLite files
+// don't persist on serverless hosts like Vercel.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PostType {
+  FIND_PARTNER
+  COURT
+}
+
+enum SkillLevel {
+  Y
+  TBY
+  TB
+  TBK
+  K
+  T
+  ANY
+}
+
+enum PostStatus {
+  OPEN
+  FILLED
+  CLOSED
+}
+
+model Post {
+  id             String     @id @default(cuid())
+  type           PostType
+  title          String
+  area           String? // quận: Hai Chau, Son Tra, Lien Chieu...
+  location       String // tên sân / địa chỉ
+  date           String // free-text or ISO date, kept simple for v1
+  time           String // e.g. "19:00-21:00"
+  skillLevel     SkillLevel @default(ANY)
+  playersNeeded  Int        @default(1)
+  playersCurrent Int        @default(0)
+  pricePerHour   Int? // VND, only relevant for COURT posts
+  contactName    String
+  contactPhone   String
+  notes          String?
+  sourceUrl       String? // optional link if saved from a Facebook post
+  status         PostStatus @default(OPEN)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+}
