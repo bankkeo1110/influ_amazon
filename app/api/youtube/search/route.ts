@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
 const INNERTUBE_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
-const INNERTUBE_URL = `https://www.youtube.com/youtubei/v1/search?key=${INNERTUBE_API_KEY}`;
+const INNERTUBE_BASE = `https://www.youtube.com/youtubei/v1`;
 
 const INNERTUBE_CONTEXT = {
   client: {
@@ -13,37 +13,90 @@ const INNERTUBE_CONTEXT = {
   },
 };
 
-const AFFILIATE_KEYWORDS = [
+const INNERTUBE_HEADERS = {
+  "Content-Type": "application/json",
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "X-YouTube-Client-Name": "1",
+  "X-YouTube-Client-Version": "2.20231219.01.00",
+  Referer: "https://www.youtube.com/",
+  Origin: "https://www.youtube.com",
+};
+
+const AFFILIATE_PATTERNS = [
   "amazon.com",
   "amzn.to",
   "amzn.com",
   "affiliate",
-  "referral",
   "commission",
-  "sponsored",
+  "i get paid",
   "paid link",
+  "paid partnership",
+  "sponsored",
+  "sponsorship",
   "discount code",
   "promo code",
+  "coupon code",
+  "use code",
   "buy here",
   "shop here",
+  "shop now",
   "bit.ly",
   "geni.us",
   "go.magik",
   "shareasale",
   "clickbank",
+  "rakuten",
+  "skimlinks",
+  "referral link",
+  "purchase through",
+  "purchases made through",
+  "text deals",
+  "deals to 1",
 ];
 
-function hasAffiliateContent(description: string): boolean {
-  const lower = description.toLowerCase();
-  return AFFILIATE_KEYWORDS.some((kw) => lower.includes(kw));
+const FACELESS_BOOST_KEYWORDS = [
+  "unboxing",
+  "unbox",
+  "hands on",
+  "hands-on",
+  "review",
+  "best ",
+  "vs ",
+  "comparison",
+  "top ",
+];
+
+const FACECAM_PENALTY_KEYWORDS = [
+  "my experience",
+  "i bought",
+  "i tried",
+  "storytime",
+  "vlog",
+  "with me",
+];
+
+function hasAffiliate(text: string): boolean {
+  const lower = text.toLowerCase();
+  return AFFILIATE_PATTERNS.some((kw) => lower.includes(kw));
 }
+
+function facelessScore(title: string): number {
+  const lower = title.toLowerCase();
+  let score = 0;
+  if (FACELESS_BOOST_KEYWORDS.some((kw) => lower.includes(kw))) score += 2;
+  if (FACECAM_PENALTY_KEYWORDS.some((kw) => lower.includes(kw))) score -= 3;
+  return score;
+}
+
+type Run = { text: string };
 
 type InnertubeVideoRenderer = {
   videoId?: string;
-  title?: { runs?: { text: string }[] };
-  descriptionSnippet?: { runs?: { text: string }[] };
+  title?: { runs?: Run[] };
+  descriptionSnippet?: { runs?: Run[] };
   thumbnail?: { thumbnails?: { url: string; width: number; height: number }[] };
-  ownerText?: { runs?: { text: string }[] };
+  ownerText?: { runs?: Run[] };
   publishedTimeText?: { simpleText?: string };
   viewCountText?: { simpleText?: string };
 };
@@ -53,7 +106,7 @@ type InnertubeItem = {
   itemSectionRenderer?: { contents?: InnertubeItem[] };
 };
 
-type InnertubeResponse = {
+type InnertubeSearchResponse = {
   contents?: {
     twoColumnSearchResultsRenderer?: {
       primaryContents?: {
@@ -65,77 +118,126 @@ type InnertubeResponse = {
   };
 };
 
-function parseInnertubeResults(data: InnertubeResponse) {
-  const items: {
-    videoId: string;
-    title: string;
-    description: string;
-    thumbnailUrl: string;
-    channelTitle: string;
-    publishedAt: string;
-    viewCount: string | null;
-  }[] = [];
+type DescriptionSection = {
+  videoPrimaryInfoRenderer?: { title?: { runs?: Run[] } };
+  videoSecondaryInfoRenderer?: { description?: { runs?: Run[] } };
+};
 
-  const contents =
-    data?.contents?.twoColumnSearchResultsRenderer?.primaryContents
-      ?.sectionListRenderer?.contents ?? [];
+type InnertubeNextResponse = {
+  contents?: {
+    twoColumnWatchNextResults?: {
+      results?: {
+        results?: {
+          contents?: DescriptionSection[];
+        };
+      };
+    };
+  };
+};
 
-  for (const section of contents) {
-    const sectionItems: InnertubeItem[] =
-      section?.itemSectionRenderer?.contents ?? [];
-    for (const item of sectionItems) {
-      const v = item?.videoRenderer;
-      if (!v?.videoId) continue;
-
-      const title = v.title?.runs?.map((r) => r.text).join("") ?? "";
-      const description =
-        v.descriptionSnippet?.runs?.map((r) => r.text).join("") ?? "";
-      const thumbnails = v.thumbnail?.thumbnails ?? [];
-      const thumbnailUrl =
-        thumbnails[thumbnails.length - 1]?.url ?? thumbnails[0]?.url ?? "";
-      const channelTitle =
-        v.ownerText?.runs?.map((r) => r.text).join("") ?? "";
-      const publishedAt = v.publishedTimeText?.simpleText ?? "";
-      const viewCount =
-        v.viewCountText?.simpleText?.replace(/[^0-9]/g, "") ?? null;
-
-      items.push({
-        videoId: v.videoId,
-        title,
-        description,
-        thumbnailUrl,
-        channelTitle,
-        publishedAt,
-        viewCount,
-      });
+async function fetchFullDescription(videoId: string): Promise<string> {
+  try {
+    const res = await fetch(`${INNERTUBE_BASE}/next?key=${INNERTUBE_API_KEY}`, {
+      method: "POST",
+      headers: INNERTUBE_HEADERS,
+      body: JSON.stringify({ context: INNERTUBE_CONTEXT, videoId }),
+    });
+    if (!res.ok) return "";
+    const data: InnertubeNextResponse = await res.json();
+    const contents =
+      data?.contents?.twoColumnWatchNextResults?.results?.results?.contents ?? [];
+    for (const section of contents) {
+      const runs = section?.videoSecondaryInfoRenderer?.description?.runs ?? [];
+      if (runs.length > 0) return runs.map((r) => r.text).join("");
     }
+    return "";
+  } catch {
+    return "";
   }
-
-  return items;
 }
 
+type Candidate = {
+  videoId: string;
+  title: string;
+  snippetDescription: string;
+  thumbnailUrl: string;
+  channelTitle: string;
+  publishedAt: string;
+  viewCount: string | null;
+};
+
 async function searchYoutube(query: string) {
-  const res = await fetch(INNERTUBE_URL, {
+  const res = await fetch(`${INNERTUBE_BASE}/search?key=${INNERTUBE_API_KEY}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "X-YouTube-Client-Name": "1",
-      "X-YouTube-Client-Version": "2.20231219.01.00",
-      Referer: "https://www.youtube.com/",
-      Origin: "https://www.youtube.com",
-    },
+    headers: INNERTUBE_HEADERS,
     body: JSON.stringify({
       context: INNERTUBE_CONTEXT,
-      query: `${query} review`,
+      query: `${query} unboxing review`,
       params: "EgIQAQ%3D%3D",
     }),
   });
 
   if (!res.ok) throw new Error(`YouTube search failed: ${res.status}`);
-  const data = await res.json();
-  return parseInnertubeResults(data);
+  const data: InnertubeSearchResponse = await res.json();
+
+  const candidates: Candidate[] = [];
+  const contents =
+    data?.contents?.twoColumnSearchResultsRenderer?.primaryContents
+      ?.sectionListRenderer?.contents ?? [];
+
+  for (const section of contents) {
+    const items: InnertubeItem[] = section?.itemSectionRenderer?.contents ?? [];
+    for (const item of items) {
+      const v = item?.videoRenderer;
+      if (!v?.videoId) continue;
+
+      const title = v.title?.runs?.map((r) => r.text).join("") ?? "";
+      const snippetDescription =
+        v.descriptionSnippet?.runs?.map((r) => r.text).join("") ?? "";
+      const thumbnails = v.thumbnail?.thumbnails ?? [];
+      const thumbnailUrl =
+        thumbnails[thumbnails.length - 1]?.url ?? thumbnails[0]?.url ?? "";
+      const channelTitle = v.ownerText?.runs?.map((r) => r.text).join("") ?? "";
+      const publishedAt = v.publishedTimeText?.simpleText ?? "";
+      const viewCount =
+        v.viewCountText?.simpleText?.replace(/[^0-9]/g, "") ?? null;
+
+      // Quick reject on title or snippet
+      if (hasAffiliate(title) || hasAffiliate(snippetDescription)) continue;
+
+      candidates.push({
+        videoId: v.videoId,
+        title,
+        snippetDescription,
+        thumbnailUrl,
+        channelTitle,
+        publishedAt,
+        viewCount,
+      });
+
+      if (candidates.length >= 15) break;
+    }
+    if (candidates.length >= 15) break;
+  }
+
+  // Fetch full descriptions in parallel then deep-filter
+  const fullDescriptions = await Promise.all(
+    candidates.map((c) => fetchFullDescription(c.videoId))
+  );
+
+  const clean: (Candidate & { description: string; score: number })[] = [];
+  for (let i = 0; i < candidates.length; i++) {
+    const fullDesc = fullDescriptions[i];
+    if (hasAffiliate(fullDesc)) continue;
+    clean.push({
+      ...candidates[i],
+      description: fullDesc || candidates[i].snippetDescription,
+      score: facelessScore(candidates[i].title),
+    });
+  }
+
+  clean.sort((a, b) => b.score - a.score);
+  return clean.slice(0, 2);
 }
 
 export async function POST(req: NextRequest) {
@@ -143,10 +245,7 @@ export async function POST(req: NextRequest) {
     const { products }: { products: string[] } = await req.json();
 
     if (!products || products.length === 0) {
-      return NextResponse.json(
-        { error: "No products provided" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "No products provided" }, { status: 400 });
     }
 
     const results = [];
@@ -155,7 +254,6 @@ export async function POST(req: NextRequest) {
       const trimmed = productName.trim();
       if (!trimmed) continue;
 
-      // Return cached result if searched in last 24h
       const existing = await prisma.productSearch.findFirst({
         where: {
           productName: trimmed,
@@ -171,15 +269,11 @@ export async function POST(req: NextRequest) {
 
       const videos = await searchYoutube(trimmed);
 
-      const cleanVideos = videos
-        .filter((v) => !hasAffiliateContent(v.description))
-        .slice(0, 2);
-
       const productSearch = await prisma.productSearch.create({
         data: {
           productName: trimmed,
           videos: {
-            create: cleanVideos.map((v) => ({
+            create: videos.map((v) => ({
               videoId: v.videoId,
               title: v.title,
               description: v.description.slice(0, 2000),
