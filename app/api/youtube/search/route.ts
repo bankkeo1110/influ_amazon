@@ -53,8 +53,19 @@ type InnertubeItem = {
   itemSectionRenderer?: { contents?: InnertubeItem[] };
 };
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function parseInnertubeResults(data: any) {
+type InnertubeResponse = {
+  contents?: {
+    twoColumnSearchResultsRenderer?: {
+      primaryContents?: {
+        sectionListRenderer?: {
+          contents?: InnertubeItem[];
+        };
+      };
+    };
+  };
+};
+
+function parseInnertubeResults(data: InnertubeResponse) {
   const items: {
     videoId: string;
     title: string;
