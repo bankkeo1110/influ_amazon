@@ -21,7 +21,7 @@ type ProductSearch = {
   videos: YoutubeVideo[];
 };
 
-function VideoCard({ video }: { video: YoutubeVideo }) {
+function VideoCard({ video, best }: { video: YoutubeVideo; best?: boolean }) {
   const url = `https://www.youtube.com/watch?v=${video.videoId}`;
   const views = video.viewCount
     ? parseInt(video.viewCount).toLocaleString()
@@ -46,6 +46,11 @@ function VideoCard({ video }: { video: YoutubeVideo }) {
         </span>
       </div>
       <div className="flex-1 min-w-0">
+        {best && (
+          <span className="inline-block bg-green-100 text-green-700 text-xs font-medium px-1.5 py-0.5 rounded mb-1">
+            best pick
+          </span>
+        )}
         <p className="text-sm font-medium text-gray-900 line-clamp-2 leading-snug group-hover:text-blue-600">
           {video.title}
         </p>
@@ -215,10 +220,13 @@ export default function YoutubePage() {
                       Product
                     </th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                      Video 1
+                      Best pick
                     </th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
                       Video 2
+                    </th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                      Video 3
                     </th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide w-28">
                       Saved
@@ -243,7 +251,7 @@ export default function YoutubePage() {
                       </td>
                       <td className="px-4 py-4 max-w-xs">
                         {search.videos[0] ? (
-                          <VideoCard video={search.videos[0]} />
+                          <VideoCard video={search.videos[0]} best />
                         ) : (
                           <span className="text-gray-400 text-xs">—</span>
                         )}
@@ -251,6 +259,13 @@ export default function YoutubePage() {
                       <td className="px-4 py-4 max-w-xs">
                         {search.videos[1] ? (
                           <VideoCard video={search.videos[1]} />
+                        ) : (
+                          <span className="text-gray-400 text-xs">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-4 max-w-xs">
+                        {search.videos[2] ? (
+                          <VideoCard video={search.videos[2]} />
                         ) : (
                           <span className="text-gray-400 text-xs">—</span>
                         )}

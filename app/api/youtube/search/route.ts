@@ -76,9 +76,35 @@ const FACECAM_PENALTY_KEYWORDS = [
   "with me",
 ];
 
+// Matches any http/https URL in text
+const URL_REGEX = /https?:\/\/[^\s)>\]]+/gi;
+
+// Domains allowed in descriptions (social/youtube own links are fine)
+const ALLOWED_DOMAINS = [
+  "youtube.com",
+  "youtu.be",
+  "instagram.com",
+  "twitter.com",
+  "x.com",
+  "facebook.com",
+  "tiktok.com",
+  "patreon.com",
+  "linktr.ee",
+  "linktree.com",
+];
+
 function hasAffiliate(text: string): boolean {
   const lower = text.toLowerCase();
   return AFFILIATE_PATTERNS.some((kw) => lower.includes(kw));
+}
+
+/** Returns true if the description contains ANY link to a commercial/external website */
+function hasCommercialLinks(text: string): boolean {
+  const urls = text.match(URL_REGEX) ?? [];
+  return urls.some((url) => {
+    const lower = url.toLowerCase();
+    return !ALLOWED_DOMAINS.some((domain) => lower.includes(domain));
+  });
 }
 
 function facelessScore(title: string): number {
@@ -225,19 +251,22 @@ async function searchYoutube(query: string) {
     candidates.map((c) => fetchFullDescription(c.videoId))
   );
 
-  const clean: (Candidate & { description: string; score: number })[] = [];
+  const clean: (Candidate & { description: string; score: number; noLinks: boolean })[] = [];
   for (let i = 0; i < candidates.length; i++) {
     const fullDesc = fullDescriptions[i];
     if (hasAffiliate(fullDesc)) continue;
+    const noLinks = !hasCommercialLinks(fullDesc);
     clean.push({
       ...candidates[i],
       description: fullDesc || candidates[i].snippetDescription,
-      score: facelessScore(candidates[i].title),
+      // Boost score heavily if no commercial links — this video goes first
+      score: facelessScore(candidates[i].title) + (noLinks ? 10 : 0),
+      noLinks,
     });
   }
 
   clean.sort((a, b) => b.score - a.score);
-  return clean.slice(0, 2);
+  return clean.slice(0, 3);
 }
 
 export async function POST(req: NextRequest) {
