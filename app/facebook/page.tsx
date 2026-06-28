@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 type FbPage = { id: string; pageId: string; name: string; category: string };
 type User = { id: string; name: string; email: string; tokenExpiry: string; pages: FbPage[] };
 
-export default function FacebookLanding() {
+// Isolated so useSearchParams() is inside a Suspense boundary
+function FacebookLandingInner() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
@@ -61,7 +62,7 @@ export default function FacebookLanding() {
   }
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gray-50">
+    <div className="flex items-center justify-center min-h-screen">
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-10 max-w-sm w-full text-center">
         <div className="w-14 h-14 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-6">
           <span className="text-white text-2xl font-bold">f</span>
@@ -90,5 +91,19 @@ export default function FacebookLanding() {
         </p>
       </div>
     </div>
+  );
+}
+
+export default function FacebookLanding() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex items-center justify-center min-h-screen">
+          <span className="text-gray-400 text-sm">Loading…</span>
+        </div>
+      }
+    >
+      <FacebookLandingInner />
+    </Suspense>
   );
 }
