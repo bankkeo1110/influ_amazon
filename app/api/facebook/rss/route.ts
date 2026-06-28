@@ -34,11 +34,12 @@ export async function POST(req: NextRequest) {
   const session = await getSession();
   if (!session.userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { fbPageId, pageId, rssUrl, intervalDays = 3, startDate } = await req.json() as {
+  const { fbPageId, pageId, rssUrl, intervalDays = 3, maxItems = 10, startDate } = await req.json() as {
     fbPageId: string;
     pageId: string;
     rssUrl: string;
     intervalDays?: number;
+    maxItems?: number;
     startDate?: string;
   };
 
@@ -51,7 +52,7 @@ export async function POST(req: NextRequest) {
 
   const parser = new Parser({ timeout: 10000 });
   const feed = await parser.parseURL(rssUrl);
-  const items = feed.items.slice(0, 30);
+  const items = feed.items.slice(0, Math.min(maxItems, 50));
 
   if (items.length === 0) {
     return NextResponse.json({ error: "RSS feed has no items" }, { status: 400 });
