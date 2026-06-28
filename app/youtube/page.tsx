@@ -3,6 +3,8 @@
 
 import { useState, useEffect, useCallback } from "react";
 
+const ACCENT = "#E05540";
+
 type YoutubeVideo = {
   id: string;
   videoId: string;
@@ -21,41 +23,56 @@ type ProductSearch = {
   videos: YoutubeVideo[];
 };
 
+function IconSearch() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+      <circle cx="6" cy="6" r="4.5" />
+      <path d="M9.5 9.5 13 13" />
+    </svg>
+  );
+}
+
 function VideoCard({ video, best }: { video: YoutubeVideo; best?: boolean }) {
   const url = `https://www.youtube.com/watch?v=${video.videoId}`;
   const views = video.viewCount
     ? parseInt(video.viewCount).toLocaleString()
     : null;
+
   return (
     <a
       href={url}
       target="_blank"
       rel="noopener noreferrer"
-      className="flex gap-2 hover:bg-gray-50 rounded-lg p-1 transition-colors group"
+      className="flex flex-col gap-1.5 group"
     >
       <div className="relative flex-shrink-0">
         <img
           src={video.thumbnailUrl}
           alt={video.title}
-          className="w-32 h-20 object-cover rounded"
+          className="w-full h-20 object-cover rounded-lg"
         />
-        <span className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-          <span className="bg-red-600 text-white rounded-full w-8 h-8 flex items-center justify-center text-sm">
+        <span className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity rounded-lg bg-black/10">
+          <span
+            className="text-white rounded-full w-8 h-8 flex items-center justify-center text-xs"
+            style={{ background: ACCENT }}
+          >
             ▶
           </span>
         </span>
-      </div>
-      <div className="flex-1 min-w-0">
         {best && (
-          <span className="inline-block bg-green-100 text-green-700 text-xs font-medium px-1.5 py-0.5 rounded mb-1">
-            best pick
+          <span
+            className="absolute top-1.5 left-1.5 text-white text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded"
+            style={{ background: ACCENT }}
+          >
+            Best Pick
           </span>
         )}
-        <p className="text-sm font-medium text-gray-900 line-clamp-2 leading-snug group-hover:text-blue-600">
-          {video.title}
+      </div>
+      <div className="min-w-0">
+        <p className="text-xs font-medium text-gray-800 line-clamp-2 leading-snug group-hover:text-gray-600 transition-colors">
+          {video.channelTitle}
         </p>
-        <p className="text-xs text-gray-500 mt-1">{video.channelTitle}</p>
-        {views && <p className="text-xs text-gray-400">{views} views</p>}
+        {views && <p className="text-[11px] text-gray-400 mt-0.5">{views} views</p>}
       </div>
     </a>
   );
@@ -95,7 +112,7 @@ export default function YoutubePage() {
 
     setLoading(true);
     setError("");
-    setProgress(`Searching ${products.length} products…`);
+    setProgress(`Searching ${products.length} product${products.length > 1 ? "s" : ""}…`);
 
     const res = await fetch("/api/youtube/search", {
       method: "POST",
@@ -129,157 +146,169 @@ export default function YoutubePage() {
     : searches;
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="max-w-7xl mx-auto px-4 py-8">
-        <div className="mb-8">
-          <h1 className="text-2xl font-bold text-gray-900">
-            YouTube Product Research
-          </h1>
-          <p className="text-gray-500 text-sm mt-1">
-            Find faceless YouTube videos for Amazon products — auto-filtered for
-            affiliate &amp; sponsored content.
-          </p>
-        </div>
+    <div className="min-h-screen px-6 py-8 max-w-[1400px] mx-auto">
+      {/* Header */}
+      <div className="mb-7">
+        <h1 className="text-[26px] font-bold text-gray-900 tracking-tight">
+          YouTube Product Research
+        </h1>
+        <p className="text-gray-400 text-sm mt-1">
+          Find faceless YouTube videos for Amazon products — auto-filtered for affiliate &amp; sponsored content.
+        </p>
+      </div>
 
-        {/* Input panel */}
-        <div className="bg-white rounded-xl border border-gray-200 p-6 mb-8 shadow-sm">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Product names{" "}
-            <span className="text-gray-400 font-normal">(one per line)</span>
-          </label>
-          <textarea
-            className="w-full border border-gray-200 rounded-lg p-3 text-sm font-mono h-40 resize-y focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder={
-              "Wireless Earbuds\nStainless Steel Water Bottle\nYoga Mat\nPortable Charger\n..."
-            }
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-          />
-          <div className="flex items-center gap-3 mt-3">
-            <button
-              onClick={handleSearch}
-              disabled={loading}
-              className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors"
-            >
-              {loading ? "Searching…" : "Search YouTube"}
-            </button>
-            {progress && (
-              <span className="text-sm text-gray-500 animate-pulse">
-                {progress}
-              </span>
-            )}
-            {error && <span className="text-sm text-red-600">{error}</span>}
-          </div>
+      {/* Input card */}
+      <div className="bg-white rounded-2xl p-6 mb-5 shadow-sm border border-black/5">
+        <label className="block text-sm font-medium text-gray-700 mb-2">
+          Product names{" "}
+          <span className="text-gray-400 font-normal">one per line</span>
+        </label>
+        <textarea
+          className="w-full border border-gray-200 rounded-xl p-3 text-sm font-mono h-36 resize-y focus:outline-none focus:ring-2 transition-shadow placeholder:text-gray-300"
+          style={{ "--tw-ring-color": ACCENT } as React.CSSProperties}
+          placeholder={"Wireless Earbuds\nStainless Steel Water Bottle\nYoga Mat\nPortable Charger\nCircular Saw"}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSearch();
+          }}
+        />
+        <div className="flex items-center gap-3 mt-4">
+          <button
+            onClick={handleSearch}
+            disabled={loading}
+            className="flex items-center gap-2 text-white px-5 py-2.5 rounded-xl text-sm font-semibold transition-opacity disabled:opacity-50"
+            style={{ background: ACCENT }}
+          >
+            <span className="text-xs">▶</span>
+            {loading ? "Searching…" : "Search YouTube"}
+          </button>
+          {progress && (
+            <span className="text-sm text-gray-400 animate-pulse">{progress}</span>
+          )}
+          {error && <span className="text-sm text-red-500">{error}</span>}
         </div>
+      </div>
 
-        {/* Results table */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-            <h2 className="font-semibold text-gray-800">
-              Saved Results{" "}
-              <span className="text-gray-400 font-normal text-sm">
-                ({searches.length} products)
+      {/* Results card */}
+      <div className="bg-white rounded-2xl shadow-sm border border-black/5 overflow-hidden">
+        {/* Table toolbar */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <h2 className="font-semibold text-gray-800 text-sm">
+            Saved Results{" "}
+            <span className="text-gray-400 font-normal">{searches.length} products</span>
+          </h2>
+          <div className="flex items-center gap-3">
+            {/* Filter input */}
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none">
+                <IconSearch />
               </span>
-            </h2>
-            <div className="flex items-center gap-3">
               <input
                 type="text"
                 placeholder="Filter products…"
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
-                className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-48"
+                className="border border-gray-200 rounded-xl pl-8 pr-3 py-1.5 text-sm focus:outline-none focus:ring-2 w-44 transition-shadow placeholder:text-gray-300"
+                style={{ "--tw-ring-color": ACCENT } as React.CSSProperties}
               />
-              <button
-                onClick={handleClear}
-                className="text-sm text-red-500 hover:text-red-700 px-3 py-1.5 rounded-lg hover:bg-red-50 transition-colors"
-              >
-                Clear all
-              </button>
             </div>
+            <button
+              onClick={handleClear}
+              className="text-sm font-medium px-3 py-1.5 rounded-lg hover:bg-red-50 transition-colors"
+              style={{ color: ACCENT }}
+            >
+              Clear all
+            </button>
           </div>
+        </div>
 
-          {historyLoading ? (
-            <div className="p-12 text-center text-gray-400 text-sm">
-              Loading saved searches…
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="p-12 text-center text-gray-400 text-sm">
-              {searches.length === 0
-                ? "No searches yet — paste product names above and click Search."
-                : "No results match your filter."}
-            </div>
-          ) : (
+        {/* Table body */}
+        {historyLoading ? (
+          <div className="p-14 text-center text-gray-300 text-sm">
+            Loading saved searches…
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="p-14 text-center text-gray-300 text-sm">
+            {searches.length === 0
+              ? "No searches yet — paste product names above and click Search."
+              : "No results match your filter."}
+          </div>
+        ) : (
+          <>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
-                <thead className="bg-gray-50 border-b border-gray-100">
-                  <tr>
-                    <th className="text-left px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide w-10">
+                <thead>
+                  <tr className="border-b border-gray-100">
+                    <th className="text-left px-6 py-3 text-[11px] font-semibold text-gray-400 uppercase tracking-widest w-10">
                       #
                     </th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide w-52">
+                    <th className="text-left px-4 py-3 text-[11px] font-semibold text-gray-400 uppercase tracking-widest w-56">
                       Product
                     </th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                      Best pick
+                    <th className="text-left px-4 py-3 text-[11px] font-semibold text-gray-400 uppercase tracking-widest">
+                      Best Pick
                     </th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                    <th className="text-left px-4 py-3 text-[11px] font-semibold text-gray-400 uppercase tracking-widest">
                       Video 2
                     </th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                    <th className="text-left px-4 py-3 text-[11px] font-semibold text-gray-400 uppercase tracking-widest">
                       Video 3
-                    </th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide w-28">
-                      Saved
                     </th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-50">
+                <tbody>
                   {filtered.map((search, i) => (
-                    <tr key={search.id} className="hover:bg-gray-50/50">
-                      <td className="px-6 py-4 text-gray-400 text-xs">
+                    <tr
+                      key={search.id}
+                      className="border-b border-gray-50 hover:bg-gray-50/60 transition-colors"
+                    >
+                      <td className="px-6 py-5 text-gray-300 text-xs font-mono">
                         {i + 1}
                       </td>
-                      <td className="px-4 py-4">
-                        <span className="font-medium text-gray-900 text-sm">
+                      <td className="px-4 py-5">
+                        <span className="font-semibold text-gray-900 text-sm leading-snug">
                           {search.productName}
                         </span>
                         {search.videos.length === 0 && (
-                          <span className="block text-xs text-orange-500 mt-0.5">
+                          <span className="block text-[11px] text-orange-400 mt-1">
                             No clean videos found
                           </span>
                         )}
                       </td>
-                      <td className="px-4 py-4 max-w-xs">
+                      <td className="px-4 py-5 w-44">
                         {search.videos[0] ? (
                           <VideoCard video={search.videos[0]} best />
                         ) : (
-                          <span className="text-gray-400 text-xs">—</span>
+                          <span className="text-gray-200 text-xs">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-4 max-w-xs">
+                      <td className="px-4 py-5 w-44">
                         {search.videos[1] ? (
                           <VideoCard video={search.videos[1]} />
                         ) : (
-                          <span className="text-gray-400 text-xs">—</span>
+                          <span className="text-gray-200 text-xs">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-4 max-w-xs">
+                      <td className="px-4 py-5 w-44">
                         {search.videos[2] ? (
                           <VideoCard video={search.videos[2]} />
                         ) : (
-                          <span className="text-gray-400 text-xs">—</span>
+                          <span className="text-gray-200 text-xs">—</span>
                         )}
-                      </td>
-                      <td className="px-4 py-4 text-gray-400 text-xs whitespace-nowrap">
-                        {new Date(search.createdAt).toLocaleDateString()}
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-          )}
-        </div>
+
+            {/* Footer */}
+            <div className="px-6 py-3 border-t border-gray-50 text-xs text-gray-400">
+              Showing {filtered.length} of {searches.length} products
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
