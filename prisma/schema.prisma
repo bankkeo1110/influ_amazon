@@ -28,3 +28,62 @@ model YoutubeVideo {
   productSearch   ProductSearch @relation(fields: [productSearchId], references: [id], onDelete: Cascade)
   createdAt       DateTime      @default(now())
 }
+
+// ─── Facebook Page Manager ───────────────────────────────────────────────────
+
+model User {
+  id          String         @id @default(cuid())
+  facebookId  String         @unique
+  name        String?
+  email       String?
+  accessToken String         // AES-256-GCM encrypted long-lived user token
+  tokenExpiry DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  pages       FacebookPage[]
+}
+
+model FacebookPage {
+  id          String             @id @default(cuid())
+  pageId      String             @unique
+  name        String
+  category    String?
+  accessToken String             // AES-256-GCM encrypted long-lived page token
+  isActive    Boolean            @default(true)
+  userId      String
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  posts       FacebookPost[]
+  queueItems  ContentQueueItem[]
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+}
+
+model FacebookPost {
+  id                String       @id @default(cuid())
+  fbPostId          String?      // ID returned by Graph API after creation
+  pageId            String
+  page              FacebookPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  message           String       @db.Text
+  imageUrl          String?
+  link              String?
+  status            String       // 'published' | 'scheduled' | 'cancelled' | 'failed'
+  scheduledTime     DateTime?
+  isRecurring       Boolean      @default(false)
+  recurringSeriesId String?
+  errorMessage      String?      @db.Text
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+}
+
+model ContentQueueItem {
+  id        String       @id @default(cuid())
+  pageId    String
+  page      FacebookPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  message   String       @db.Text
+  imageUrl  String?
+  link      String?
+  sortOrder Int          @default(0)
+  consumed  Boolean      @default(false)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+}
