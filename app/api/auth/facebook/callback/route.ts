@@ -5,6 +5,34 @@ import { getSession } from "@/lib/session";
 
 const BASE = "https://graph.facebook.com/v19.0";
 
+function popupHtml(type: "success" | "error", payload?: string) {
+  const message = type === "success"
+    ? JSON.stringify({ type: "fb_auth_success" })
+    : JSON.stringify({ type: "fb_auth_error", error: payload ?? "unknown" });
+
+  return `<!DOCTYPE html>
+<html>
+<head><title>${type === "success" ? "Connected" : "Auth failed"}</title>
+<style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#EEEBE6}</style>
+</head>
+<body>
+<p style="color:#666;font-size:14px">${type === "success" ? "Connected! Closing…" : "Auth failed. Closing…"}</p>
+<script>
+  try {
+    if (window.opener) {
+      window.opener.postMessage(${message}, window.location.origin);
+      window.close();
+    } else {
+      window.location.href = ${type === "success" ? '"/facebook/pages"' : `"/facebook?auth_error=${encodeURIComponent(payload ?? "unknown")}"`};
+    }
+  } catch(e) {
+    window.location.href = "/facebook";
+  }
+</script>
+</body>
+</html>`;
+}
+
 async function exchangeForShortLived(code: string): Promise<string> {
   const params = new URLSearchParams({
     client_id: process.env.FACEBOOK_APP_ID!,
@@ -36,10 +64,7 @@ async function exchangeForLongLived(shortToken: string): Promise<{ token: string
 }
 
 async function getMe(token: string): Promise<{ id: string; name: string; email?: string }> {
-  const params = new URLSearchParams({
-    fields: "id,name,email",
-    access_token: token,
-  });
+  const params = new URLSearchParams({ fields: "id,name,email", access_token: token });
   const res = await fetch(`${BASE}/me?${params}`);
   const data = await res.json();
   if (data.error) throw new Error(data.error.message);
@@ -52,9 +77,9 @@ export async function GET(req: NextRequest) {
   const errorParam = searchParams.get("error");
 
   if (errorParam || !code) {
-    return NextResponse.redirect(
-      new URL(`/facebook?auth_error=${errorParam ?? "no_code"}`, req.url)
-    );
+    return new NextResponse(popupHtml("error", errorParam ?? "no_code"), {
+      headers: { "Content-Type": "text/html" },
+    });
   }
 
   try {
@@ -86,12 +111,14 @@ export async function GET(req: NextRequest) {
     session.userName = user.name ?? undefined;
     await session.save();
 
-    return NextResponse.redirect(new URL("/facebook/pages", req.url));
+    return new NextResponse(popupHtml("success"), {
+      headers: { "Content-Type": "text/html" },
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown_error";
     console.error("[FB callback]", msg);
-    return NextResponse.redirect(
-      new URL(`/facebook?auth_error=${encodeURIComponent(msg)}`, req.url)
-    );
+    return new NextResponse(popupHtml("error", msg), {
+      headers: { "Content-Type": "text/html" },
+    });
   }
 }
