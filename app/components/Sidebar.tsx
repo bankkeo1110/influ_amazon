@@ -48,6 +48,15 @@ function IconRss() {
   );
 }
 
+function IconSettings() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="7" cy="7" r="2" />
+      <path d="M7 1v1.5M7 11.5V13M13 7h-1.5M2.5 7H1M11.2 2.8l-1 1M3.8 10.2l-1 1M11.2 11.2l-1-1M3.8 3.8l-1-1" />
+    </svg>
+  );
+}
+
 function IconChevronLeft() {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -92,6 +101,7 @@ const sections: NavSection[] = [
       { href: "/facebook/compose",   label: "Compose Post",    Icon: IconPencil },
       { href: "/facebook/rss",       label: "RSS to Facebook", Icon: IconRss },
       { href: "/facebook/queue",     label: "Content Queue",   Icon: IconList },
+      { href: "/facebook/pages",     label: "Manage Pages",    Icon: IconSettings },
     ],
   },
 ];

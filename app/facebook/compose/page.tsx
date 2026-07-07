@@ -116,7 +116,7 @@ export default function ComposePage() {
             </a>
           </p>
         ) : (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2 items-center">
             {pages.map((p) => (
               <button
                 key={p.id}
@@ -130,6 +130,12 @@ export default function ComposePage() {
                 {p.name}
               </button>
             ))}
+            <a
+              href="/facebook/pages"
+              className="px-3 py-1.5 rounded-lg text-sm border border-dashed border-gray-300 text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
+            >
+              + Add Page
+            </a>
           </div>
         )}
       </div>
