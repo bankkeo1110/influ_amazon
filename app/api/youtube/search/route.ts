@@ -266,7 +266,7 @@ async function searchYoutube(query: string) {
   }
 
   clean.sort((a, b) => b.score - a.score);
-  return clean.slice(0, 3);
+  return clean.slice(0, 5);
 }
 
 export async function POST(req: NextRequest) {
