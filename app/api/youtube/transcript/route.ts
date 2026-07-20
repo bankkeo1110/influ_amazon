@@ -94,22 +94,96 @@ type TimedTextEvent = {
 
 type TranscriptResult =
   | { ok: true; events: TimedTextEvent[] }
-  | { ok: false; reason: "no_captions" | "upstream_error"; status?: number };
+  | { ok: false; reason: "no_captions" | "upstream_error" | "blocked"; status?: number };
 
-async function fetchTranscript(videoId: string): Promise<TranscriptResult> {
-  // Caption track metadata lives on the /player response, not /next
-  // (/next returns the watch-next/engagement panel data and never includes captions).
-  const playerRes = await fetch(`${INNERTUBE_BASE}/player?key=${INNERTUBE_API_KEY}`, {
+type PlayerResponseData = {
+  playabilityStatus?: { status?: string; reason?: string };
+  captions?: { playerCaptionsTracklistRenderer?: { captionTracks?: CaptionTrack[] } };
+};
+
+type PlayerResponseResult =
+  | { ok: true; data: PlayerResponseData }
+  | { ok: false; reason: "upstream_error" | "blocked"; status?: number };
+
+// Pull the same playerResponse JSON the real watch page embeds, by fetching the
+// page HTML like a browser would. This is what the major transcript libraries do —
+// it's far less bot-detected than POSTing straight to youtubei/v1/player from a
+// server IP, which YouTube increasingly blocks/empties out for datacenter traffic.
+async function fetchPlayerResponseFromWatchPage(videoId: string): Promise<PlayerResponseResult> {
+  const res = await fetch(`https://www.youtube.com/watch?v=${videoId}&hl=en&persist_hl=1`, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9",
+      Cookie: "CONSENT=YES+1",
+    },
+  });
+
+  if (!res.ok) {
+    console.error(`[transcript] watch page fetch failed for ${videoId}: ${res.status}`);
+    return { ok: false, reason: "upstream_error", status: res.status };
+  }
+
+  const html = await res.text();
+  const startMarker = "var ytInitialPlayerResponse = ";
+  const start = html.indexOf(startMarker);
+  if (start === -1) {
+    console.error(`[transcript] ytInitialPlayerResponse not found for ${videoId} (likely consent/bot-check page)`);
+    return { ok: false, reason: "blocked" };
+  }
+
+  const jsonStart = start + startMarker.length;
+  const endMarkers = [";var meta", ";</script>", ";\nvar ", ";window["];
+  let end = -1;
+  for (const marker of endMarkers) {
+    const idx = html.indexOf(marker, jsonStart);
+    if (idx !== -1 && (end === -1 || idx < end)) end = idx;
+  }
+  if (end === -1) {
+    console.error(`[transcript] could not delimit ytInitialPlayerResponse for ${videoId}`);
+    return { ok: false, reason: "upstream_error" };
+  }
+
+  try {
+    const data = JSON.parse(html.slice(jsonStart, end));
+    return { ok: true, data };
+  } catch {
+    console.error(`[transcript] failed to parse ytInitialPlayerResponse JSON for ${videoId}`);
+    return { ok: false, reason: "upstream_error" };
+  }
+}
+
+// Fallback: POST directly to the InnerTube /player endpoint (same JSON shape).
+async function fetchPlayerResponseFromInnertube(videoId: string): Promise<PlayerResponseResult> {
+  const res = await fetch(`${INNERTUBE_BASE}/player?key=${INNERTUBE_API_KEY}`, {
     method: "POST",
     headers: INNERTUBE_HEADERS,
     body: JSON.stringify({ context: INNERTUBE_CONTEXT, videoId }),
   });
 
-  if (!playerRes.ok) {
-    console.error(`[transcript] /player request failed for ${videoId}: ${playerRes.status}`);
-    return { ok: false, reason: "upstream_error", status: playerRes.status };
+  if (!res.ok) {
+    console.error(`[transcript] /player request failed for ${videoId}: ${res.status}`);
+    return { ok: false, reason: "upstream_error", status: res.status };
   }
-  const playerData = await playerRes.json();
+  return { ok: true, data: await res.json() };
+}
+
+async function fetchTranscript(videoId: string): Promise<TranscriptResult> {
+  let playerResult = await fetchPlayerResponseFromWatchPage(videoId);
+  if (!playerResult.ok) {
+    playerResult = await fetchPlayerResponseFromInnertube(videoId);
+  }
+  if (!playerResult.ok) {
+    return { ok: false, reason: playerResult.reason, status: playerResult.status };
+  }
+
+  const playerData = playerResult.data;
+  const playability = playerData?.playabilityStatus?.status;
+  if (playability && playability !== "OK") {
+    console.error(
+      `[transcript] playabilityStatus=${playability} reason=${playerData?.playabilityStatus?.reason ?? "n/a"} for ${videoId}`
+    );
+  }
 
   const tracks: CaptionTrack[] =
     playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
@@ -157,6 +231,12 @@ export async function GET(req: NextRequest) {
     if (!result.ok) {
       if (result.reason === "no_captions") {
         return NextResponse.json({ error: "No transcript available" }, { status: 404 });
+      }
+      if (result.reason === "blocked") {
+        return NextResponse.json(
+          { error: "YouTube is blocking automated requests right now, try again later" },
+          { status: 502 }
+        );
       }
       console.error(`[transcript] upstream_error for ${videoId}, status=${result.status}`);
       return NextResponse.json(
