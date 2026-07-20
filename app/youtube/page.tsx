@@ -257,7 +257,9 @@ function VideoCard({ video, best }: { video: YoutubeVideo; best?: boolean }) {
 
   async function handleTranscript() {
     setShowModal(true);
-    if (txState !== "idle") return;
+    // Allow retrying after a transient failure, but not after a confirmed no-captions result.
+    if (txState === "loading" || txState === "done") return;
+    if (txState === "error" && txError === "No transcript available") return;
     setTxState("loading");
     try {
       const res = await fetch(`/api/youtube/transcript?videoId=${video.videoId}`);
@@ -335,7 +337,9 @@ function VideoCard({ video, best }: { video: YoutubeVideo; best?: boolean }) {
         </div>
       )}
       {txState === "error" && (
-        <span className="text-[9px] text-gray-300">No transcript</span>
+        <span className="text-[9px] text-gray-300">
+          {txError === "No transcript available" ? "No transcript" : "Failed — tap to retry"}
+        </span>
       )}
 
       {/* Transcript button */}
@@ -347,6 +351,8 @@ function VideoCard({ video, best }: { video: YoutubeVideo; best?: boolean }) {
           ? "⏳ Loading…"
           : txState === "done"
           ? "📄 View transcript"
+          : txState === "error" && txError !== "No transcript available"
+          ? "🔄 Retry"
           : "📄 Transcript"}
       </button>
 

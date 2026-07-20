@@ -92,21 +92,31 @@ type TimedTextEvent = {
   segs?: Array<{ utf8: string }>;
 };
 
-async function fetchTranscript(videoId: string): Promise<TimedTextEvent[] | null> {
-  // Get caption track URL from InnerTube /next response
-  const nextRes = await fetch(`${INNERTUBE_BASE}/next?key=${INNERTUBE_API_KEY}`, {
+type TranscriptResult =
+  | { ok: true; events: TimedTextEvent[] }
+  | { ok: false; reason: "no_captions" | "upstream_error"; status?: number };
+
+async function fetchTranscript(videoId: string): Promise<TranscriptResult> {
+  // Caption track metadata lives on the /player response, not /next
+  // (/next returns the watch-next/engagement panel data and never includes captions).
+  const playerRes = await fetch(`${INNERTUBE_BASE}/player?key=${INNERTUBE_API_KEY}`, {
     method: "POST",
     headers: INNERTUBE_HEADERS,
     body: JSON.stringify({ context: INNERTUBE_CONTEXT, videoId }),
   });
 
-  if (!nextRes.ok) return null;
-  const nextData = await nextRes.json();
+  if (!playerRes.ok) {
+    console.error(`[transcript] /player request failed for ${videoId}: ${playerRes.status}`);
+    return { ok: false, reason: "upstream_error", status: playerRes.status };
+  }
+  const playerData = await playerRes.json();
 
   const tracks: CaptionTrack[] =
-    nextData?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
+    playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
 
-  if (tracks.length === 0) return null;
+  if (tracks.length === 0) {
+    return { ok: false, reason: "no_captions" };
+  }
 
   // Prefer English ASR → English manual → first available
   const track =
@@ -114,15 +124,25 @@ async function fetchTranscript(videoId: string): Promise<TimedTextEvent[] | null
     tracks.find((t) => t.languageCode === "en") ??
     tracks[0];
 
-  if (!track?.baseUrl) return null;
+  if (!track?.baseUrl) {
+    console.error(`[transcript] caption track missing baseUrl for ${videoId}`);
+    return { ok: false, reason: "no_captions" };
+  }
 
   const tRes = await fetch(`${track.baseUrl}&fmt=json3`, {
     headers: { Referer: "https://www.youtube.com/" },
   });
 
-  if (!tRes.ok) return null;
+  if (!tRes.ok) {
+    console.error(`[transcript] timedtext fetch failed for ${videoId}: ${tRes.status}`);
+    return { ok: false, reason: "upstream_error", status: tRes.status };
+  }
   const tData = await tRes.json();
-  return (tData?.events as TimedTextEvent[]) ?? null;
+  const events = (tData?.events as TimedTextEvent[]) ?? [];
+  if (events.length === 0) {
+    return { ok: false, reason: "no_captions" };
+  }
+  return { ok: true, events };
 }
 
 export async function GET(req: NextRequest) {
@@ -132,11 +152,20 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const events = await fetchTranscript(videoId);
+    const result = await fetchTranscript(videoId);
 
-    if (!events || events.length === 0) {
-      return NextResponse.json({ error: "No transcript available" }, { status: 404 });
+    if (!result.ok) {
+      if (result.reason === "no_captions") {
+        return NextResponse.json({ error: "No transcript available" }, { status: 404 });
+      }
+      console.error(`[transcript] upstream_error for ${videoId}, status=${result.status}`);
+      return NextResponse.json(
+        { error: "Transcript temporarily unavailable, try again" },
+        { status: 502 }
+      );
     }
+
+    const events = result.events;
 
     const segments = events
       .filter((e) => e.segs && e.segs.length > 0)
@@ -169,6 +198,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ segments, summary });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
+    console.error(`[transcript] unhandled error for ${videoId}: ${message}`);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
