@@ -1,27 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-
-const INNERTUBE_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
-const INNERTUBE_BASE = `https://www.youtube.com/youtubei/v1`;
-
-const INNERTUBE_CONTEXT = {
-  client: {
-    clientName: "WEB",
-    clientVersion: "2.20231219.01.00",
-    hl: "en",
-    gl: "US",
-  },
-};
-
-const INNERTUBE_HEADERS = {
-  "Content-Type": "application/json",
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  "X-YouTube-Client-Name": "1",
-  "X-YouTube-Client-Version": "2.20231219.01.00",
-  Referer: "https://www.youtube.com/",
-  Origin: "https://www.youtube.com",
-};
+import { abOpen, abEval } from "@/lib/agentBrowser";
 
 const AFFILIATE_PATTERNS = [
   "amazon.com",
@@ -144,40 +123,29 @@ type InnertubeSearchResponse = {
   };
 };
 
-type DescriptionSection = {
-  videoPrimaryInfoRenderer?: { title?: { runs?: Run[] } };
-  videoSecondaryInfoRenderer?: { description?: { runs?: Run[] } };
-};
-
-type InnertubeNextResponse = {
-  contents?: {
-    twoColumnWatchNextResults?: {
-      results?: {
-        results?: {
-          contents?: DescriptionSection[];
-        };
-      };
-    };
-  };
-};
-
+// Fetches a watch page for real in a headless Chrome tab (via agent-browser) and reads
+// window.ytInitialData off it, instead of POSTing to the InnerTube /next endpoint from
+// the server — YouTube increasingly blocks/empties out that raw datacenter-IP traffic.
 async function fetchFullDescription(videoId: string): Promise<string> {
   try {
-    const res = await fetch(`${INNERTUBE_BASE}/next?key=${INNERTUBE_API_KEY}`, {
-      method: "POST",
-      headers: INNERTUBE_HEADERS,
-      body: JSON.stringify({ context: INNERTUBE_CONTEXT, videoId }),
-    });
-    if (!res.ok) return "";
-    const data: InnertubeNextResponse = await res.json();
-    const contents =
-      data?.contents?.twoColumnWatchNextResults?.results?.results?.contents ?? [];
-    for (const section of contents) {
-      const runs = section?.videoSecondaryInfoRenderer?.description?.runs ?? [];
-      if (runs.length > 0) return runs.map((r) => r.text).join("");
-    }
-    return "";
-  } catch {
+    await abOpen(`https://www.youtube.com/watch?v=${videoId}&hl=en`);
+    const description = await abEval<string>(`
+      (function() {
+        var contents = window.ytInitialData?.contents?.twoColumnWatchNextResults
+          ?.results?.results?.contents ?? [];
+        for (var i = 0; i < contents.length; i++) {
+          var vsir = contents[i]?.videoSecondaryInfoRenderer;
+          var content = vsir?.attributedDescription?.content;
+          if (content) return content;
+          var runs = vsir?.description?.runs;
+          if (runs && runs.length) return runs.map(function(r) { return r.text; }).join("");
+        }
+        return "";
+      })();
+    `);
+    return description ?? "";
+  } catch (err) {
+    console.error(`[youtube-search] failed to fetch description for ${videoId}:`, err);
     return "";
   }
 }
@@ -193,18 +161,15 @@ type Candidate = {
 };
 
 async function searchYoutube(query: string) {
-  const res = await fetch(`${INNERTUBE_BASE}/search?key=${INNERTUBE_API_KEY}`, {
-    method: "POST",
-    headers: INNERTUBE_HEADERS,
-    body: JSON.stringify({
-      context: INNERTUBE_CONTEXT,
-      query: `${query} unboxing review`,
-      params: "EgIQAQ%3D%3D",
-    }),
-  });
+  // sp=EgIQAQ%3D%3D restricts results to the "Video" filter, same as the old POST params.
+  const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(
+    `${query} unboxing review`
+  )}&sp=EgIQAQ%3D%3D`;
 
-  if (!res.ok) throw new Error(`YouTube search failed: ${res.status}`);
-  const data: InnertubeSearchResponse = await res.json();
+  await abOpen(searchUrl);
+  const data = await abEval<InnertubeSearchResponse>(`
+    (function() { return window.ytInitialData || null; })();
+  `);
 
   const candidates: Candidate[] = [];
   const contents =
@@ -246,10 +211,12 @@ async function searchYoutube(query: string) {
     if (candidates.length >= 15) break;
   }
 
-  // Fetch full descriptions in parallel then deep-filter
-  const fullDescriptions = await Promise.all(
-    candidates.map((c) => fetchFullDescription(c.videoId))
-  );
+  // Fetch full descriptions one at a time — agent-browser drives a single real Chrome
+  // tab per session, so these can't run in parallel like the old raw-fetch version did.
+  const fullDescriptions: string[] = [];
+  for (const c of candidates) {
+    fullDescriptions.push(await fetchFullDescription(c.videoId));
+  }
 
   const clean: (Candidate & { description: string; score: number; noLinks: boolean })[] = [];
   for (let i = 0; i < candidates.length; i++) {

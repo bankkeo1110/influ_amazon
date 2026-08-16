@@ -1,26 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const INNERTUBE_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
-const INNERTUBE_BASE = "https://www.youtube.com/youtubei/v1";
-
-const INNERTUBE_CONTEXT = {
-  client: {
-    clientName: "WEB",
-    clientVersion: "2.20231219.01.00",
-    hl: "en",
-    gl: "US",
-  },
-};
-
-const INNERTUBE_HEADERS = {
-  "Content-Type": "application/json",
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  "X-YouTube-Client-Name": "1",
-  "X-YouTube-Client-Version": "2.20231219.01.00",
-  Referer: "https://www.youtube.com/",
-  Origin: "https://www.youtube.com",
-};
+import { abOpen, abEval } from "@/lib/agentBrowser";
 
 const PRICE_PATTERNS = [
   /\$\d+/,
@@ -81,12 +60,6 @@ function formatTimestamp(ms: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-type CaptionTrack = {
-  baseUrl?: string;
-  languageCode?: string;
-  kind?: string;
-};
-
 type TimedTextEvent = {
   tStartMs: number;
   segs?: Array<{ utf8: string }>;
@@ -96,126 +69,132 @@ type TranscriptResult =
   | { ok: true; events: TimedTextEvent[] }
   | { ok: false; reason: "no_captions" | "upstream_error" | "blocked"; status?: number };
 
-type PlayerResponseData = {
-  playabilityStatus?: { status?: string; reason?: string };
-  captions?: { playerCaptionsTracklistRenderer?: { captionTracks?: CaptionTrack[] } };
-};
+// "0:00" / "12:34" / "1:02:03" → milliseconds
+function parseTimestampToMs(ts: string): number {
+  const seconds = ts
+    .split(":")
+    .map((p) => parseInt(p, 10))
+    .reduce((acc, n) => acc * 60 + (Number.isNaN(n) ? 0 : n), 0);
+  return seconds * 1000;
+}
 
-type PlayerResponseResult =
-  | { ok: true; data: PlayerResponseData }
-  | { ok: false; reason: "upstream_error" | "blocked"; status?: number };
+type RawTranscriptSegment = { time: string; text: string };
 
-// Pull the same playerResponse JSON the real watch page embeds, by fetching the
-// page HTML like a browser would. This is what the major transcript libraries do —
-// it's far less bot-detected than POSTing straight to youtubei/v1/player from a
-// server IP, which YouTube increasingly blocks/empties out for datacenter traffic.
-async function fetchPlayerResponseFromWatchPage(videoId: string): Promise<PlayerResponseResult> {
-  const res = await fetch(`https://www.youtube.com/watch?v=${videoId}&hl=en&persist_hl=1`, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Accept-Language": "en-US,en;q=0.9",
-      Cookie: "CONSENT=YES+1",
-    },
-  });
-
-  if (!res.ok) {
-    console.error(`[transcript] watch page fetch failed for ${videoId}: ${res.status}`);
-    return { ok: false, reason: "upstream_error", status: res.status };
+// The transcript button lives inside the (collapsed-by-default) description panel and
+// is duplicated elsewhere in the DOM at zero size — clicking blindly by aria-label hits
+// an inert copy. This scopes to the real one, expands the description if needed (the
+// standard "…more" text-match grabs a sidebar recommendation's expander instead, so we
+// scope to ytd-watch-metadata specifically), then clicks it for real and reads the
+// rendered panel — the same thing a human would do. It all runs as one atomic script so
+// the click and the read happen in the same tick, no round trips for the page to drift.
+const TRANSCRIPT_SCRIPT = `
+(async function() {
+  function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+  function isVisible(el) {
+    var r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+  function fireClick(el) {
+    el.scrollIntoView({ block: 'center' });
+    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(type) {
+      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    });
   }
 
-  const html = await res.text();
-  const startMarker = "var ytInitialPlayerResponse = ";
-  const start = html.indexOf(startMarker);
-  if (start === -1) {
-    console.error(`[transcript] ytInitialPlayerResponse not found for ${videoId} (likely consent/bot-check page)`);
+  var meta = document.querySelector('ytd-watch-metadata');
+  var expander = meta ? meta.querySelector('ytd-text-inline-expander') : null;
+  if (expander && expander.isTruncated) {
+    var moreCandidates = Array.from(expander.querySelectorAll('*')).filter(function(el) {
+      return (el.textContent || '').trim().toLowerCase().replace(/\\s+/g, ' ') === '...more';
+    });
+    var moreBtn = moreCandidates[moreCandidates.length - 1];
+    if (moreBtn) {
+      fireClick(moreBtn);
+      await sleep(500);
+    }
+  }
+
+  var transcriptBtns = Array.from(
+    document.querySelectorAll('button[aria-label="Show transcript"]')
+  ).filter(isVisible);
+  if (transcriptBtns.length === 0) return { clicked: false, segments: [] };
+  fireClick(transcriptBtns[0]);
+
+  function read() {
+    var els = document.querySelectorAll(
+      'transcript-segment-view-model, ytd-transcript-segment-renderer'
+    );
+    var out = [];
+    els.forEach(function(el) {
+      var timeEl = el.querySelector('.ytwTranscriptSegmentViewModelTimestamp, .segment-timestamp');
+      var textEl = el.querySelector('.ytAttributedStringHost, yt-formatted-string.segment-text, .segment-text');
+      var time = timeEl ? timeEl.textContent.trim() : '';
+      var text = textEl ? textEl.textContent.trim() : '';
+      if (text) out.push({ time: time, text: text });
+    });
+    return out;
+  }
+  for (var i = 0; i < 16; i++) {
+    var out = read();
+    if (out.length > 0) return { clicked: true, segments: out };
+    await sleep(500);
+  }
+  return { clicked: true, segments: [] };
+})();
+`;
+
+// Drives a real headless Chrome tab (via agent-browser) instead of hitting YouTube's
+// InnerTube endpoints from the server. Those endpoints now require a live session/POT
+// token that a bare server-side fetch can't produce — this reads the same "Show
+// transcript" panel a human would open, which needs no such token.
+async function fetchTranscript(videoId: string): Promise<TranscriptResult> {
+  try {
+    await abOpen(`https://www.youtube.com/watch?v=${videoId}&hl=en`);
+  } catch (err) {
+    console.error(`[transcript] failed to open watch page for ${videoId}:`, err);
+    return { ok: false, reason: "upstream_error" };
+  }
+
+  const state = await abEval<{ playability: string | null; trackCount: number }>(`
+    (function() {
+      var pr = window.ytInitialPlayerResponse;
+      var tracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
+      return {
+        playability: pr?.playabilityStatus?.status ?? null,
+        trackCount: tracks.length,
+      };
+    })();
+  `).catch(() => ({ playability: null, trackCount: 0 }));
+
+  if (state.playability && state.playability !== "OK") {
+    console.error(`[transcript] playabilityStatus=${state.playability} for ${videoId}`);
     return { ok: false, reason: "blocked" };
   }
 
-  const jsonStart = start + startMarker.length;
-  const endMarkers = [";var meta", ";</script>", ";\nvar ", ";window["];
-  let end = -1;
-  for (const marker of endMarkers) {
-    const idx = html.indexOf(marker, jsonStart);
-    if (idx !== -1 && (end === -1 || idx < end)) end = idx;
-  }
-  if (end === -1) {
-    console.error(`[transcript] could not delimit ytInitialPlayerResponse for ${videoId}`);
-    return { ok: false, reason: "upstream_error" };
+  if (state.trackCount === 0) {
+    return { ok: false, reason: "no_captions" };
   }
 
-  try {
-    const data = JSON.parse(html.slice(jsonStart, end));
-    return { ok: true, data };
-  } catch {
-    console.error(`[transcript] failed to parse ytInitialPlayerResponse JSON for ${videoId}`);
-    return { ok: false, reason: "upstream_error" };
-  }
-}
-
-// Fallback: POST directly to the InnerTube /player endpoint (same JSON shape).
-async function fetchPlayerResponseFromInnertube(videoId: string): Promise<PlayerResponseResult> {
-  const res = await fetch(`${INNERTUBE_BASE}/player?key=${INNERTUBE_API_KEY}`, {
-    method: "POST",
-    headers: INNERTUBE_HEADERS,
-    body: JSON.stringify({ context: INNERTUBE_CONTEXT, videoId }),
+  const result = await abEval<{ clicked: boolean; segments: RawTranscriptSegment[] }>(
+    TRANSCRIPT_SCRIPT,
+    30000
+  ).catch((err) => {
+    console.error(`[transcript] failed to read transcript panel for ${videoId}:`, err);
+    return { clicked: false, segments: [] as RawTranscriptSegment[] };
   });
 
-  if (!res.ok) {
-    console.error(`[transcript] /player request failed for ${videoId}: ${res.status}`);
-    return { ok: false, reason: "upstream_error", status: res.status };
-  }
-  return { ok: true, data: await res.json() };
-}
-
-async function fetchTranscript(videoId: string): Promise<TranscriptResult> {
-  let playerResult = await fetchPlayerResponseFromWatchPage(videoId);
-  if (!playerResult.ok) {
-    playerResult = await fetchPlayerResponseFromInnertube(videoId);
-  }
-  if (!playerResult.ok) {
-    return { ok: false, reason: playerResult.reason, status: playerResult.status };
-  }
-
-  const playerData = playerResult.data;
-  const playability = playerData?.playabilityStatus?.status;
-  if (playability && playability !== "OK") {
+  if (result.segments.length === 0) {
     console.error(
-      `[transcript] playabilityStatus=${playability} reason=${playerData?.playabilityStatus?.reason ?? "n/a"} for ${videoId}`
+      `[transcript] captions exist but panel yielded no segments for ${videoId} (clicked=${result.clicked})`
     );
+    return { ok: false, reason: "upstream_error" };
   }
 
-  const tracks: CaptionTrack[] =
-    playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
+  const events: TimedTextEvent[] = result.segments.map((seg) => ({
+    tStartMs: parseTimestampToMs(seg.time),
+    segs: [{ utf8: seg.text }],
+  }));
 
-  if (tracks.length === 0) {
-    return { ok: false, reason: "no_captions" };
-  }
-
-  // Prefer English ASR → English manual → first available
-  const track =
-    tracks.find((t) => t.languageCode === "en" && t.kind === "asr") ??
-    tracks.find((t) => t.languageCode === "en") ??
-    tracks[0];
-
-  if (!track?.baseUrl) {
-    console.error(`[transcript] caption track missing baseUrl for ${videoId}`);
-    return { ok: false, reason: "no_captions" };
-  }
-
-  const tRes = await fetch(`${track.baseUrl}&fmt=json3`, {
-    headers: { Referer: "https://www.youtube.com/" },
-  });
-
-  if (!tRes.ok) {
-    console.error(`[transcript] timedtext fetch failed for ${videoId}: ${tRes.status}`);
-    return { ok: false, reason: "upstream_error", status: tRes.status };
-  }
-  const tData = await tRes.json();
-  const events = (tData?.events as TimedTextEvent[]) ?? [];
-  if (events.length === 0) {
-    return { ok: false, reason: "no_captions" };
-  }
   return { ok: true, events };
 }
 
