@@ -1,4 +1,5 @@
 import { abOpen, abEval, abScroll } from "@/lib/agentBrowser";
+import { fetchTranscriptEvents } from "@/lib/youtubeTranscript";
 
 // How many verified (avg length under the cap) channels we try to collect per query.
 const TARGET_RESULTS = 50;
@@ -128,35 +129,93 @@ async function searchCandidateChannels(query: string): Promise<RawChannel[]> {
   return candidates;
 }
 
+type ChannelVideoStats = {
+  avgLengthSec: number | null;
+  // First video's ID from the grid, used as the sample for the audio-quality check below.
+  sampleVideoId: string | null;
+};
+
+function extractVideoId(href: string): string | null {
+  const m = href.match(/[?&]v=([^&]+)/);
+  return m ? m[1] : null;
+}
+
 // Visits the channel's Videos tab and reads the duration badges shown on the video grid
 // — no need to open individual videos, YouTube already renders "8:23" etc. on the
-// thumbnails themselves.
-async function measureAverageLength(href: string): Promise<number | null> {
+// thumbnails themselves. Also grabs the first video's ID, to use as the sample for the
+// audio-quality check.
+async function getChannelVideoStats(href: string): Promise<ChannelVideoStats> {
   await abOpen(`https://www.youtube.com${href}/videos`);
 
-  const durations = await abEval<string[]>(`
+  const raw = await abEval<{ href: string | null; duration: string | null }[]>(`
     (function() {
-      var els = document.querySelectorAll('.ytBadgeShapeText');
+      var items = document.querySelectorAll('ytd-rich-item-renderer');
       var out = [];
-      var re = /^\\d{1,2}:\\d{2}(:\\d{2})?$/;
-      els.forEach(function(el) {
-        var txt = el.textContent.trim();
-        if (re.test(txt)) out.push(txt);
+      items.forEach(function(el) {
+        var link = el.querySelector('a[href^="/watch?v="]');
+        var badge = el.querySelector('.ytBadgeShapeText');
+        out.push({
+          href: link ? link.getAttribute('href') : null,
+          duration: badge ? badge.textContent.trim() : null,
+        });
       });
       return out.slice(0, 12);
     })();
   `);
 
-  const seconds = durations.map(parseDurationToSeconds).filter((n) => n > 0);
-  if (seconds.length === 0) return null;
-  return Math.round(seconds.reduce((a, b) => a + b, 0) / seconds.length);
+  const durationRe = /^\d{1,2}:\d{2}(:\d{2})?$/;
+  const seconds = raw
+    .map((r) => r.duration)
+    .filter((d): d is string => !!d && durationRe.test(d))
+    .map(parseDurationToSeconds)
+    .filter((n) => n > 0);
+
+  const avgLengthSec =
+    seconds.length > 0 ? Math.round(seconds.reduce((a, b) => a + b, 0) / seconds.length) : null;
+
+  const firstHref = raw.find((r) => r.href)?.href ?? null;
+  const sampleVideoId = firstHref ? extractVideoId(firstHref) : null;
+
+  return { avgLengthSec, sampleVideoId };
+}
+
+// Segments that are pure non-speech markers ("[Music]", "(Music)") or contain musical
+// note symbols — auto-captions insert these where background music is playing instead
+// of (or over) narration. A transcript dominated by these is a proxy for "not clear
+// sound" / "has background music". This can't detect visual quality ("clear
+// background") — there's no text signal for that; it would need an actual vision check.
+const MUSIC_MARKER_RE = /^[[(]?\s*(music|instrumental|background music|sound effects?)\s*[\])]?$/i;
+const NOTE_SYMBOL_RE = /[♪♫]/; // ♪ ♫
+const MAX_MUSIC_SEGMENT_RATIO = 0.15;
+
+async function hasClearAudio(videoId: string): Promise<boolean> {
+  const result = await fetchTranscriptEvents(videoId).catch((err) => {
+    console.error(`[channel-finder] transcript check failed for ${videoId}:`, err);
+    return null;
+  });
+
+  // Most small/niche channels never get auto-captions processed at all — that's not
+  // evidence of bad audio, just absence of a signal. Don't punish what we can't check;
+  // only reject when captions exist and actually show music dominating the track.
+  if (!result || !result.ok) return true;
+
+  const texts = result.events
+    .flatMap((e) => e.segs?.map((s) => s.utf8.trim()) ?? [])
+    .filter(Boolean);
+
+  if (texts.length === 0) return true;
+
+  const musicSegments = texts.filter((t) => MUSIC_MARKER_RE.test(t) || NOTE_SYMBOL_RE.test(t));
+  return musicSegments.length / texts.length <= MAX_MUSIC_SEGMENT_RATIO;
 }
 
 /**
  * Searches YouTube for channels matching `query`, then visits each candidate's Videos
  * tab (in relevance order) to measure its average video length, keeping only the ones
- * under MAX_AVG_SECONDS — a proxy for "quick faceless review" content — until we hit
- * TARGET_RESULTS or run out of candidates/attempts.
+ * under MAX_AVG_SECONDS — a proxy for "quick faceless review" content. Survivors then
+ * get a second, heavier check: a sample video's transcript is scanned for background
+ * music markers, since a face-and-music-free "clear sound" review is what's requested.
+ * Keeps going until TARGET_RESULTS or the candidate/attempt budget runs out.
  */
 export async function findChannels(query: string): Promise<FoundChannel[]> {
   const candidates = await searchCandidateChannels(query);
@@ -169,12 +228,17 @@ export async function findChannels(query: string): Promise<FoundChannel[]> {
     if (!c.href) continue;
     attempts++;
 
-    const avgLengthSec = await measureAverageLength(c.href).catch((err) => {
+    const stats = await getChannelVideoStats(c.href).catch((err) => {
       console.error(`[channel-finder] failed to measure ${c.href}:`, err);
-      return null;
+      return { avgLengthSec: null, sampleVideoId: null } as ChannelVideoStats;
     });
 
+    const { avgLengthSec, sampleVideoId } = stats;
     if (avgLengthSec === null || avgLengthSec < MIN_AVG_SECONDS || avgLengthSec >= MAX_AVG_SECONDS) {
+      continue;
+    }
+
+    if (!sampleVideoId || !(await hasClearAudio(sampleVideoId))) {
       continue;
     }
 
