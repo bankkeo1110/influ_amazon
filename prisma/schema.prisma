@@ -29,6 +29,31 @@ model YoutubeVideo {
   createdAt       DateTime      @default(now())
 }
 
+// ─── Channel Finder ──────────────────────────────────────────────────────────
+
+model ChannelQuery {
+  id        String    @id @default(cuid())
+  query     String
+  status    String    @default("pending") // pending | done | error
+  error     String?   @db.Text
+  createdAt DateTime  @default(now())
+  channels  Channel[]
+}
+
+model Channel {
+  id             String       @id @default(cuid())
+  name           String
+  handle         String?
+  url            String
+  thumbnailUrl   String?
+  subscriberText String?
+  avgLengthSec   Int?
+  description    String?      @db.Text
+  channelQueryId String
+  channelQuery   ChannelQuery @relation(fields: [channelQueryId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+}
+
 // ─── Facebook Page Manager ───────────────────────────────────────────────────
 
 model User {

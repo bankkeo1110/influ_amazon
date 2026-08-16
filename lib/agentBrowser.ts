@@ -70,6 +70,15 @@ export async function abClick(selector: string, timeoutMs = 15000): Promise<void
   await serialize(() => runCli(["click", selector, "--json"], timeoutMs));
 }
 
+/** Scroll the page (used to trigger YouTube's infinite-scroll loading of more results). */
+export async function abScroll(
+  direction: "up" | "down" | "left" | "right",
+  px: number,
+  timeoutMs = 15000
+): Promise<void> {
+  await serialize(() => runCli(["scroll", direction, String(px), "--json"], timeoutMs));
+}
+
 /**
  * Run JavaScript in the page and return its (JSON-serializable) result.
  * The script may be an async IIFE; agent-browser awaits the resolved value.

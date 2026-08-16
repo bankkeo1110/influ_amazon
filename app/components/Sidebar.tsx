@@ -38,6 +38,15 @@ function IconList() {
   );
 }
 
+function IconSearch2() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <circle cx="6" cy="6" r="4.5" />
+      <path d="M9.5 9.5 13 13" />
+    </svg>
+  );
+}
+
 function IconRss() {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -91,7 +100,10 @@ const sections: NavSection[] = [
   {
     title: "YouTube",
     labelColor: "#E05540",
-    items: [{ href: "/youtube", label: "Product Research", Icon: IconPlay }],
+    items: [
+      { href: "/youtube", label: "Product Research", Icon: IconPlay },
+      { href: "/channels", label: "Channel Finder", Icon: IconSearch2 },
+    ],
   },
   {
     title: "Facebook Pages",
