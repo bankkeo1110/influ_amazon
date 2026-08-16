@@ -6,8 +6,13 @@ export type TimedTextEvent = {
 };
 
 export type TranscriptResult =
-  | { ok: true; events: TimedTextEvent[] }
-  | { ok: false; reason: "no_captions" | "upstream_error" | "blocked"; status?: number };
+  | { ok: true; events: TimedTextEvent[]; languageCodes: string[] }
+  | {
+      ok: false;
+      reason: "no_captions" | "upstream_error" | "blocked";
+      status?: number;
+      languageCodes: string[];
+    };
 
 // "0:00" / "12:34" / "1:02:03" → milliseconds
 function parseTimestampToMs(ts: string): number {
@@ -92,27 +97,32 @@ export async function fetchTranscriptEvents(videoId: string): Promise<Transcript
     await abOpen(`https://www.youtube.com/watch?v=${videoId}&hl=en`);
   } catch (err) {
     console.error(`[transcript] failed to open watch page for ${videoId}:`, err);
-    return { ok: false, reason: "upstream_error" };
+    return { ok: false, reason: "upstream_error", languageCodes: [] };
   }
 
-  const state = await abEval<{ playability: string | null; trackCount: number }>(`
+  const state = await abEval<{
+    playability: string | null;
+    trackCount: number;
+    languageCodes: string[];
+  }>(`
     (function() {
       var pr = window.ytInitialPlayerResponse;
       var tracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
       return {
         playability: pr?.playabilityStatus?.status ?? null,
         trackCount: tracks.length,
+        languageCodes: tracks.map(function(t) { return t.languageCode || ''; }).filter(Boolean),
       };
     })();
-  `).catch(() => ({ playability: null, trackCount: 0 }));
+  `).catch(() => ({ playability: null, trackCount: 0, languageCodes: [] as string[] }));
 
   if (state.playability && state.playability !== "OK") {
     console.error(`[transcript] playabilityStatus=${state.playability} for ${videoId}`);
-    return { ok: false, reason: "blocked" };
+    return { ok: false, reason: "blocked", languageCodes: state.languageCodes };
   }
 
   if (state.trackCount === 0) {
-    return { ok: false, reason: "no_captions" };
+    return { ok: false, reason: "no_captions", languageCodes: state.languageCodes };
   }
 
   const result = await abEval<{ clicked: boolean; segments: RawTranscriptSegment[] }>(
@@ -127,7 +137,7 @@ export async function fetchTranscriptEvents(videoId: string): Promise<Transcript
     console.error(
       `[transcript] captions exist but panel yielded no segments for ${videoId} (clicked=${result.clicked})`
     );
-    return { ok: false, reason: "upstream_error" };
+    return { ok: false, reason: "upstream_error", languageCodes: state.languageCodes };
   }
 
   const events: TimedTextEvent[] = result.segments.map((seg) => ({
@@ -135,5 +145,5 @@ export async function fetchTranscriptEvents(videoId: string): Promise<Transcript
     segs: [{ utf8: seg.text }],
   }));
 
-  return { ok: true, events };
+  return { ok: true, events, languageCodes: state.languageCodes };
 }

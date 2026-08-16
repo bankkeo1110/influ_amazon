@@ -39,6 +39,39 @@ function cleanSearchQuery(query: string): string {
   return cleaned || query;
 }
 
+// Cheap, text-only English-language check. Two signals: a channel whose name/description
+// is written in a non-Latin script (Bengali, Devanagari, Arabic, CJK, Cyrillic, ...) is
+// clearly not English; a channel that's Latin-script but shares no vocabulary with common
+// English words (Indonesian, Vietnamese, Portuguese, ...) is also flagged. Returns null
+// when there isn't enough text to judge either way — callers should give the benefit of
+// the doubt rather than treat "unknown" as "rejected".
+const COMMON_ENGLISH_WORDS = new Set([
+  "the", "and", "you", "your", "this", "that", "with", "for", "from", "are", "have",
+  "review", "reviews", "unboxing", "unbox", "channel", "video", "videos", "best", "new",
+  "welcome", "hello", "what", "will", "can", "get", "all", "our", "out", "about", "how",
+  "tool", "tools", "power", "product", "products", "today", "here", "watch", "subscribe",
+]);
+
+// Plain \uXXXX ranges (no `u` flag / \p{} property escapes needed — this project's tsc
+// target doesn't support those) covering the non-Latin scripts most likely to show up:
+// Greek, Cyrillic, Armenian, Hebrew, Arabic, the Devanagari-through-Sinhala block (Hindi,
+// Bengali, Tamil, Telugu, ...), Thai, Myanmar, Georgian, Hangul, Hiragana/Katakana, CJK.
+const NON_LATIN_SCRIPT_RE =
+  /[Ͱ-ϿЀ-ӿ԰-֏֐-׿؀-ۿݐ-ݿऀ-෿฀-๿က-႟Ⴀ-ჿᄀ-ᇿ぀-ヿ㐀-䶿一-鿿가-힣]/g;
+
+function looksEnglishFromText(text: string): boolean | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const nonLatinMatches = trimmed.match(NON_LATIN_SCRIPT_RE) ?? [];
+  if (nonLatinMatches.length / trimmed.length > 0.1) return false;
+
+  const words = trimmed.toLowerCase().match(/[a-z']+/g) ?? [];
+  if (words.length < 4) return null; // not enough Latin-script text to judge vocabulary
+
+  return words.some((w) => COMMON_ENGLISH_WORDS.has(w));
+}
+
 type RawChannel = {
   href: string | null;
   name: string | null;
@@ -188,37 +221,65 @@ const MUSIC_MARKER_RE = /^[[(]?\s*(music|instrumental|background music|sound eff
 const NOTE_SYMBOL_RE = /[♪♫]/; // ♪ ♫
 const MAX_MUSIC_SEGMENT_RATIO = 0.15;
 
-async function hasClearAudio(videoId: string): Promise<boolean> {
+type ContentQuality = { clearAudio: boolean; isEnglish: boolean | null };
+
+async function checkContentQuality(
+  videoId: string,
+  fallbackText: string
+): Promise<ContentQuality> {
   const result = await fetchTranscriptEvents(videoId).catch((err) => {
     console.error(`[channel-finder] transcript check failed for ${videoId}:`, err);
     return null;
   });
 
+  if (!result) {
+    // Total failure to even load the page — no signal either way, don't penalize.
+    return { clearAudio: true, isEnglish: looksEnglishFromText(fallbackText) };
+  }
+
+  // Caption language code is a much stronger signal than text heuristics when it's
+  // available — YouTube auto-detects the actual spoken language for ASR tracks.
+  const isEnglish =
+    result.languageCodes.length > 0
+      ? result.languageCodes.some((code) => code.toLowerCase().startsWith("en"))
+      : looksEnglishFromText(fallbackText);
+
   // Most small/niche channels never get auto-captions processed at all — that's not
   // evidence of bad audio, just absence of a signal. Don't punish what we can't check;
   // only reject when captions exist and actually show music dominating the track.
-  if (!result || !result.ok) return true;
+  if (!result.ok) return { clearAudio: true, isEnglish };
 
   const texts = result.events
     .flatMap((e) => e.segs?.map((s) => s.utf8.trim()) ?? [])
     .filter(Boolean);
 
-  if (texts.length === 0) return true;
+  if (texts.length === 0) return { clearAudio: true, isEnglish };
 
   const musicSegments = texts.filter((t) => MUSIC_MARKER_RE.test(t) || NOTE_SYMBOL_RE.test(t));
-  return musicSegments.length / texts.length <= MAX_MUSIC_SEGMENT_RATIO;
+  const clearAudio = musicSegments.length / texts.length <= MAX_MUSIC_SEGMENT_RATIO;
+
+  return { clearAudio, isEnglish };
 }
 
 /**
  * Searches YouTube for channels matching `query`, then visits each candidate's Videos
  * tab (in relevance order) to measure its average video length, keeping only the ones
  * under MAX_AVG_SECONDS — a proxy for "quick faceless review" content. Survivors then
- * get a second, heavier check: a sample video's transcript is scanned for background
- * music markers, since a face-and-music-free "clear sound" review is what's requested.
- * Keeps going until TARGET_RESULTS or the candidate/attempt budget runs out.
+ * get a second, heavier check: a sample video's transcript/caption language is read to
+ * reject non-English channels and background-music-dominated audio. Candidates that are
+ * obviously non-English by name/description alone are dropped before any of that, to
+ * avoid wasting page loads on them. Keeps going until TARGET_RESULTS or the
+ * candidate/attempt budget runs out.
  */
 export async function findChannels(query: string): Promise<FoundChannel[]> {
-  const candidates = await searchCandidateChannels(query);
+  const allCandidates = await searchCandidateChannels(query);
+
+  // Cheap pre-filter: drop candidates that are unambiguously non-English by name/
+  // description before spending a page load on them. Anything ambiguous (null) stays in
+  // the pool for the more reliable per-video caption-language check below.
+  const candidates = allCandidates.filter(
+    (c) => looksEnglishFromText(`${c.name ?? ""} ${c.description ?? ""}`) !== false
+  );
 
   const results: FoundChannel[] = [];
   let attempts = 0;
@@ -238,9 +299,10 @@ export async function findChannels(query: string): Promise<FoundChannel[]> {
       continue;
     }
 
-    if (!sampleVideoId || !(await hasClearAudio(sampleVideoId))) {
-      continue;
-    }
+    if (!sampleVideoId) continue;
+
+    const quality = await checkContentQuality(sampleVideoId, `${c.name ?? ""} ${c.description ?? ""}`);
+    if (!quality.clearAudio || quality.isEnglish === false) continue;
 
     results.push({
       name: c.name ?? c.handle ?? c.href,
