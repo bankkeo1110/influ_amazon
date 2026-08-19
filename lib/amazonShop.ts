@@ -2,11 +2,14 @@
  * Amazon influencer storefront crawler.
  *
  * Discovery — runs the `site:https://www.amazon.com/shop` query against a search
- * engine and pulls the vanity handles out of the result URLs.
+ * engine and pulls the vanity handles out of the result URLs. Backends are tried
+ * in order until one returns results, so a throttled engine does not sink a crawl:
  *   - Google Programmable Search JSON API when GOOGLE_API_KEY + GOOGLE_CSE_ID are
- *     set. google.com itself refuses server-side scraping: it hard-requires JS.
- *   - DuckDuckGo's HTML endpoint otherwise, which needs no key but rate-limits
- *     aggressively (HTTP 202 with an empty result list).
+ *     set. Scraping google.com directly is not an option — it hard-requires JS,
+ *     and a real headless browser gets bounced to the /sorry CAPTCHA.
+ *   - Bing's HTML results, which need no key and tolerate repeated queries.
+ *   - DuckDuckGo's HTML endpoint, keyless but quick to rate-limit an IP for
+ *     minutes at a time (HTTP 202 with an empty result list).
  *
  * Enrichment — per handle:
  *   - name  from the og:title of the storefront page (read aborted after ~120 KB)
@@ -14,14 +17,128 @@
  *           endpoint the storefront's Videos tab pages through, 20 per page.
  */
 
+import https from "node:https";
+import zlib from "node:zlib";
+
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-const BROWSER_HEADERS = {
+const BROWSER_HEADERS: Record<string, string> = {
   "User-Agent": UA,
   "Accept-Language": "en-US,en;q=0.9",
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 };
+
+// ── HTTP ──────────────────────────────────────────────────────────────────────
+
+type HttpResponse = { status: number; body: string; url: string };
+
+type HttpOptions = {
+  method?: "GET" | "POST";
+  headers?: Record<string, string>;
+  /** Form-encoded request body; sets Content-Type when present. */
+  form?: URLSearchParams;
+  /** Stop reading and drop the connection once this many bytes have arrived. */
+  maxBytes?: number;
+  timeoutMs?: number;
+};
+
+/**
+ * Plain node:https instead of fetch.
+ *
+ * Node's fetch (undici) always attaches `accept-encoding: gzip, deflate`, and
+ * Amazon's storefront AJAX endpoints answer any compressed request with HTTP 400
+ * — the identical request without that header returns 200, and fetch gives no way
+ * to drop it. Doing our own request also lets us destroy a response mid-stream
+ * (see maxBytes) without leaving a half-read body pinning a pooled connection.
+ */
+function httpRequest(rawUrl: string, options: HttpOptions = {}): Promise<HttpResponse> {
+  const {
+    method = "GET",
+    headers = BROWSER_HEADERS,
+    form,
+    maxBytes = Infinity,
+    timeoutMs = 30_000,
+  } = options;
+
+  return new Promise((resolve, reject) => {
+    const url = new URL(rawUrl);
+    const payload = form ? Buffer.from(form.toString()) : null;
+    let settled = false;
+
+    const succeed = (value: HttpResponse) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+
+    const req = https.request(
+      {
+        protocol: url.protocol,
+        host: url.hostname,
+        path: url.pathname + url.search,
+        method,
+        headers: {
+          // No Accept-Encoding on purpose: Amazon's getItems endpoint answers any
+          // compressed request with HTTP 400, and undici's fetch always sends one.
+          // Responses still get decompressed below if a server compresses anyway.
+          ...headers,
+          ...(payload
+            ? {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": String(payload.length),
+              }
+            : {}),
+        },
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        const location = res.headers.location;
+
+        if (status >= 300 && status < 400 && location) {
+          res.resume(); // drain so the socket can be reused
+          const next = new URL(location, url).toString();
+          httpRequest(next, options).then(succeed, fail);
+          return;
+        }
+
+        const encoding = String(res.headers["content-encoding"] ?? "");
+        const stream =
+          encoding === "gzip"
+            ? res.pipe(zlib.createGunzip())
+            : encoding === "deflate"
+              ? res.pipe(zlib.createInflate())
+              : res;
+
+        let body = "";
+        const finish = () => succeed({ status, body, url: url.toString() });
+
+        stream.on("data", (chunk: Buffer | string) => {
+          body += chunk.toString();
+          if (body.length >= maxBytes) {
+            // Enough read — drop the connection rather than pulling the rest.
+            req.destroy();
+            finish();
+          }
+        });
+        stream.on("end", finish);
+        stream.on("error", fail);
+      }
+    );
+
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`Timed out after ${timeoutMs}ms`)));
+    // A destroy() we triggered after maxBytes lands here too; `settled` filters it out.
+    req.on("error", fail);
+
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
 
 export const DEFAULT_QUERY = "site:https://www.amazon.com/shop";
 
@@ -180,19 +297,15 @@ async function searchDuckDuckGo(query: string, maxResults: number): Promise<Shop
   let blocked = true;
   for (let attempt = 0; attempt < 3 && blocked; attempt++) {
     if (attempt > 0) await sleep(2000 * attempt);
-    const res = await fetch(
-      `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
-      { headers: BROWSER_HEADERS }
+    const res = await httpRequest(
+      `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`
     );
-    html = await res.text();
+    html = res.body;
     blocked = res.status === 202 || parseDuckDuckGoResults(html).length === 0;
   }
 
   if (blocked) {
-    throw new Error(
-      "DuckDuckGo is rate-limiting this IP (HTTP 202). Wait a few minutes, or set " +
-        "GOOGLE_API_KEY and GOOGLE_CSE_ID to crawl through the Google Programmable Search API."
-    );
+    throw new Error("rate-limited this IP (HTTP 202)");
   }
 
   collect(html);
@@ -203,19 +316,18 @@ async function searchDuckDuckGo(query: string, maxResults: number): Promise<Shop
     if (!form) break;
     await sleep(1800);
 
-    const res = await fetch("https://html.duckduckgo.com/html/", {
+    const res = await httpRequest("https://html.duckduckgo.com/html/", {
       method: "POST",
       headers: {
         ...BROWSER_HEADERS,
-        "Content-Type": "application/x-www-form-urlencoded",
         Referer: "https://html.duckduckgo.com/",
         Origin: "https://html.duckduckgo.com",
       },
-      body: new URLSearchParams(form),
+      form: new URLSearchParams(form),
     });
     if (res.status === 202) break;
 
-    html = await res.text();
+    html = res.body;
     if (parseDuckDuckGoResults(html).length === 0) break;
     collect(html);
   }
@@ -223,44 +335,148 @@ async function searchDuckDuckGo(query: string, maxResults: number): Promise<Shop
   return Array.from(hits.values()).slice(0, maxResults);
 }
 
-export type SearchProvider = "auto" | "google" | "duckduckgo";
+// ── Discovery: Bing HTML ──────────────────────────────────────────────────────
 
-export function resolveProvider(requested: SearchProvider): "google" | "duckduckgo" {
-  if (requested === "google") return "google";
-  if (requested === "duckduckgo") return "duckduckgo";
-  return process.env.GOOGLE_API_KEY && process.env.GOOGLE_CSE_ID ? "google" : "duckduckgo";
+/**
+ * Bing hides every result behind /ck/a?…&u=a1<base64url of the real URL>.
+ * Returns the href unchanged when it is not one of those redirects.
+ */
+function unwrapBingLink(href: string): string {
+  const match = href.match(/[?&]u=a1([A-Za-z0-9_-]+)/);
+  if (!match) return href;
+  try {
+    return Buffer.from(match[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString(
+      "utf8"
+    );
+  } catch {
+    return href;
+  }
 }
 
+function parseBingResults(html: string): ShopHit[] {
+  const out: ShopHit[] = [];
+  const re = /<h2[^>]*>\s*<a\b[^>]*href="([^"]+)"[\s\S]*?>([\s\S]*?)<\/a>/g;
+  for (const m of Array.from(html.matchAll(re))) {
+    const href = unwrapBingLink(decodeEntities(m[1]));
+    const handle = handleFromUrl(href);
+    if (!handle) continue;
+    const title = decodeEntities(m[2].replace(/<[^>]*>/g, "")).trim();
+    out.push({ handle, url: shopUrl(handle), title });
+  }
+  return out;
+}
+
+/** Bing's own next-page link carries an FPIG token; a bare &first=N is ignored. */
+function bingNextUrl(html: string): string | null {
+  const href =
+    html.match(/<a class="sb_pagN[^"]*"[^>]*href="([^"]+)"/)?.[1] ??
+    html.match(/aria-label="Page 2"[^>]*href="([^"]+)"/)?.[1];
+  if (!href) return null;
+  const path = decodeEntities(href);
+  return path.startsWith("http") ? path : `https://www.bing.com${path}`;
+}
+
+async function searchBing(query: string, maxResults: number): Promise<ShopHit[]> {
+  const hits = new Map<string, ShopHit>();
+  let url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=30`;
+
+  for (let page = 0; page < 10 && hits.size < maxResults; page++) {
+    const res = await httpRequest(url, {
+      headers: { ...BROWSER_HEADERS, Referer: "https://www.bing.com/" },
+    });
+    if (res.status !== 200) break;
+    const html = res.body;
+
+    const before = hits.size;
+    for (const hit of parseBingResults(html)) {
+      const keyed = hit.handle.toLowerCase();
+      if (!hits.has(keyed)) hits.set(keyed, hit);
+    }
+
+    // Bing keeps serving pages after the result set is exhausted, repeating the
+    // last page — stop as soon as one adds nothing new.
+    if (hits.size === before) break;
+
+    const next = bingNextUrl(html);
+    if (!next) break;
+    url = next;
+    await sleep(800);
+  }
+
+  return Array.from(hits.values()).slice(0, maxResults);
+}
+
+// ── Provider selection ────────────────────────────────────────────────────────
+
+export type SearchProvider = "auto" | "google" | "bing" | "duckduckgo";
+export type ResolvedProvider = Exclude<SearchProvider, "auto">;
+
+const BACKENDS: Record<
+  ResolvedProvider,
+  (query: string, maxResults: number) => Promise<ShopHit[]>
+> = {
+  google: searchGoogle,
+  bing: searchBing,
+  duckduckgo: searchDuckDuckGo,
+};
+
+export function hasGoogleKeys(): boolean {
+  return Boolean(process.env.GOOGLE_API_KEY && process.env.GOOGLE_CSE_ID);
+}
+
+/**
+ * Order to try when the caller said "auto". Google's JSON API is the best source
+ * when it is configured; Bing is the most tolerant of the keyless scrapers, and
+ * DuckDuckGo backs it up (it rate-limits an IP for minutes at a time).
+ */
+function providerChain(requested: SearchProvider): ResolvedProvider[] {
+  if (requested !== "auto") return [requested];
+  return hasGoogleKeys() ? ["google", "bing", "duckduckgo"] : ["bing", "duckduckgo"];
+}
+
+export type SearchOutcome = {
+  provider: ResolvedProvider;
+  hits: ShopHit[];
+  /** Backends that were tried first and did not deliver, for surfacing in the UI. */
+  attempts: { provider: ResolvedProvider; error: string }[];
+};
+
+/**
+ * Walks the provider chain and returns the first backend that yields results, so
+ * one throttled search engine does not sink the whole crawl.
+ */
 export async function searchShops(
   query: string,
   maxResults: number,
-  provider: "google" | "duckduckgo"
-): Promise<ShopHit[]> {
-  return provider === "google"
-    ? searchGoogle(query, maxResults)
-    : searchDuckDuckGo(query, maxResults);
+  requested: SearchProvider
+): Promise<SearchOutcome> {
+  const chain = providerChain(requested);
+  const attempts: { provider: ResolvedProvider; error: string }[] = [];
+
+  for (const provider of chain) {
+    try {
+      const hits = await BACKENDS[provider](query, maxResults);
+      if (hits.length > 0) return { provider, hits, attempts };
+      attempts.push({ provider, error: "returned no amazon.com/shop results" });
+    } catch (err) {
+      attempts.push({
+        provider,
+        error: err instanceof Error ? err.message : "Unknown error",
+      });
+    }
+  }
+
+  // Nothing worked — report every backend's reason rather than just the last one.
+  const detail = attempts.map((a) => `${a.provider}: ${a.error}`).join(" | ");
+  throw new Error(`No search backend returned results — ${detail}`);
 }
 
 // ── Enrichment: storefront name ───────────────────────────────────────────────
 
 /** Reads only the first ~120 KB of the storefront page — the head is all we need. */
 async function fetchHead(url: string, limit = 120_000): Promise<string> {
-  const res = await fetch(url, { headers: BROWSER_HEADERS, redirect: "follow" });
-  if (!res.ok || !res.body) return "";
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  try {
-    while (buf.length < limit) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
-  return buf;
+  const res = await httpRequest(url, { maxBytes: limit });
+  return res.status === 200 ? res.body : "";
 }
 
 export async function fetchShopName(handle: string): Promise<string | null> {
@@ -300,11 +516,11 @@ export async function countShopVideos(
     let url = `https://www.amazon.com/shop/${encodeURIComponent(handle)}/getItems?viewScope=Video`;
     if (token) url += `&pageToken=${encodeURIComponent(token)}`;
 
-    const res = await fetch(url, { headers: BROWSER_HEADERS });
+    const res = await httpRequest(url);
     // A handle without a Videos tab answers 404 — that is a complete count of 0,
     // not a truncated one.
-    if (!res.ok) return { count: ids.size, capped: false };
-    const html = await res.text();
+    if (res.status !== 200) return { count: ids.size, capped: false };
+    const html = res.body;
 
     const before = ids.size;
     for (const m of Array.from(html.matchAll(/amzn1\.vse\.video\.([a-f0-9]{32})/g))) {

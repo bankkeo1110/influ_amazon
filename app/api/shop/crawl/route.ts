@@ -5,7 +5,6 @@ import {
   countShopVideos,
   fetchShopName,
   mapWithConcurrency,
-  resolveProvider,
   searchShops,
   shopUrl,
   type SearchProvider,
@@ -34,10 +33,13 @@ export async function POST(req: NextRequest) {
     const query = (body.query ?? "").trim() || DEFAULT_QUERY;
     const maxResults = Math.min(200, Math.max(1, body.maxResults ?? 30));
     const maxVideoPages = Math.min(50, Math.max(1, body.maxVideoPages ?? 10));
-    const provider = resolveProvider(body.provider ?? "auto");
     const refresh = body.refresh === true;
 
-    const hits = await searchShops(query, maxResults, provider);
+    const { provider, hits, attempts } = await searchShops(
+      query,
+      maxResults,
+      body.provider ?? "auto"
+    );
 
     if (hits.length === 0) {
       return NextResponse.json({
@@ -48,6 +50,7 @@ export async function POST(req: NextRequest) {
         updated: 0,
         skipped: 0,
         failed: 0,
+        attempts,
         warning: "The search returned no amazon.com/shop results for this query.",
       });
     }
@@ -116,6 +119,7 @@ export async function POST(req: NextRequest) {
       skipped,
       failed: failures.length,
       failures: failures.slice(0, 10),
+      attempts,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";

@@ -31,8 +31,16 @@ type CrawlResult = {
   updated: number;
   skipped: number;
   failed: number;
+  attempts?: { provider: string; error: string }[];
   warning?: string;
 };
+
+const PROVIDERS = [
+  { value: "auto", label: "Auto" },
+  { value: "google", label: "Google API" },
+  { value: "bing", label: "Bing" },
+  { value: "duckduckgo", label: "DuckDuckGo" },
+];
 
 type SortField = "name" | "handle" | "videoCount" | "lastCrawledAt";
 
@@ -62,6 +70,7 @@ export default function ShopPage() {
   const [query, setQuery] = useState(DEFAULT_QUERY);
   const [maxResults, setMaxResults] = useState(30);
   const [maxVideoPages, setMaxVideoPages] = useState(10);
+  const [provider, setProvider] = useState("auto");
   const [refresh, setRefresh] = useState(false);
   const [crawling, setCrawling] = useState(false);
   const [crawlError, setCrawlError] = useState("");
@@ -127,7 +136,7 @@ export default function ShopPage() {
       const res = await fetch("/api/shop/crawl", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, maxResults, maxVideoPages, refresh }),
+        body: JSON.stringify({ query, maxResults, maxVideoPages, provider, refresh }),
       });
       const data = await res.json();
       if (data.error) setCrawlError(data.error);
@@ -214,6 +223,22 @@ export default function ShopPage() {
             />
             <span className="text-xs text-gray-400">×20 videos</span>
           </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-bold text-gray-400 uppercase tracking-widest whitespace-nowrap">
+              Engine
+            </label>
+            <select
+              value={provider}
+              onChange={(e) => setProvider(e.target.value)}
+              className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-gray-900"
+            >
+              {PROVIDERS.map((p) => (
+                <option key={p.value} value={p.value}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </div>
           <label className="flex items-center gap-2 text-xs font-bold text-gray-400 uppercase tracking-widest cursor-pointer">
             <input
               type="checkbox"
@@ -235,6 +260,12 @@ export default function ShopPage() {
             new, {crawlResult.updated} updated, {crawlResult.skipped} already fresh
             {crawlResult.failed > 0 && `, ${crawlResult.failed} failed`}.
             {crawlResult.warning && ` ${crawlResult.warning}`}
+            {crawlResult.attempts && crawlResult.attempts.length > 0 && (
+              <span className="block mt-1 text-xs text-gray-400">
+                Fell back after{" "}
+                {crawlResult.attempts.map((a) => `${a.provider} (${a.error})`).join(", ")}.
+              </span>
+            )}
           </p>
         )}
       </div>
