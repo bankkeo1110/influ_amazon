@@ -66,6 +66,15 @@ function IconSettings() {
   );
 }
 
+function IconBag() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2.5 4.5h9l-.8 8H3.3l-.8-8Z" />
+      <path d="M5 4.5V3a2 2 0 0 1 4 0v1.5" />
+    </svg>
+  );
+}
+
 function IconChevronLeft() {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -115,6 +124,11 @@ const sections: NavSection[] = [
       { href: "/facebook/queue",     label: "Content Queue",   Icon: IconList },
       { href: "/facebook/pages",     label: "Manage Pages",    Icon: IconSettings },
     ],
+  },
+  {
+    title: "Amazon",
+    labelColor: "#F59E0B",
+    items: [{ href: "/shop", label: "Shop", Icon: IconBag }],
   },
 ];
 

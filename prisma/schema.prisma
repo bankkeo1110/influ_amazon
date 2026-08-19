@@ -112,3 +112,21 @@ model ContentQueueItem {
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 }
+
+// ─── Amazon Influencer Storefronts ───────────────────────────────────────────
+
+model AmazonShop {
+  id            String   @id @default(cuid())
+  handle        String   @unique // vanity handle from /shop/<handle>
+  url           String
+  name          String
+  videoCount    Int      @default(0)
+  countCapped   Boolean  @default(false) // true when the video walk hit maxVideoPages
+  sourceQuery   String?
+  lastCrawledAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([videoCount])
+  @@index([name])
+}
