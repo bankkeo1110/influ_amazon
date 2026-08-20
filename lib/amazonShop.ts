@@ -499,7 +499,17 @@ export async function fetchShopName(handle: string): Promise<string | null> {
 
 // ── Enrichment: video count ───────────────────────────────────────────────────
 
-export type VideoCount = { count: number; capped: boolean };
+export type VideoCount = { count: number; capped: boolean; throttled: boolean };
+
+/**
+ * Amazon soft-blocks the storefront AJAX endpoints under load, answering 400 or
+ * 503 for handles that resolve perfectly well a minute earlier. That is NOT the
+ * same as a storefront with no videos, and must never be recorded as a count of
+ * zero — doing so overwrites real numbers with wrong ones.
+ */
+function isThrottleStatus(status: number): boolean {
+  return status === 400 || status === 503 || status === 429;
+}
 
 /**
  * Walks the storefront's Videos tab. Each page carries 20 videos plus the
@@ -517,9 +527,14 @@ export async function countShopVideos(
     if (token) url += `&pageToken=${encodeURIComponent(token)}`;
 
     const res = await httpRequest(url);
+    // A soft block is not an empty storefront — say so, so the caller can skip
+    // the write and retry later rather than saving a bogus zero.
+    if (isThrottleStatus(res.status)) {
+      return { count: ids.size, capped: false, throttled: true };
+    }
     // A handle without a Videos tab answers 404 — that is a complete count of 0,
     // not a truncated one.
-    if (res.status !== 200) return { count: ids.size, capped: false };
+    if (res.status !== 200) return { count: ids.size, capped: false, throttled: false };
     const html = res.body;
 
     const before = ids.size;
@@ -530,13 +545,13 @@ export async function countShopVideos(
     const more = html.match(/name="shouldLoadMoreFlag" value="([^"]*)"/)?.[1];
     const next = html.match(/name="pageToken" value="([^"]*)"/)?.[1] ?? "";
     if (more !== "true" || !next || next === token || ids.size === before) {
-      return { count: ids.size, capped: false };
+      return { count: ids.size, capped: false, throttled: false };
     }
     token = next;
     await sleep(150);
   }
 
-  return { count: ids.size, capped: true };
+  return { count: ids.size, capped: true, throttled: false };
 }
 
 // ── Discovery inside Amazon itself ────────────────────────────────────────────
@@ -551,7 +566,7 @@ export async function countShopVideos(
 export async function mineStorefrontAsins(
   handle: string,
   maxPages: number
-): Promise<string[]> {
+): Promise<{ asins: string[]; throttled: boolean }> {
   const asins = new Set<string>();
   let token: string | null = null;
 
@@ -560,6 +575,10 @@ export async function mineStorefrontAsins(
     if (token) url += `&pageToken=${encodeURIComponent(token)}`;
 
     const res = await httpRequest(url);
+    // Soft block — report it so the caller does not mark this storefront mined.
+    if (isThrottleStatus(res.status)) {
+      return { asins: Array.from(asins), throttled: true };
+    }
     if (res.status !== 200) break;
 
     // The feed HTML-escapes its JSON, so match the data-asin attribute instead.
@@ -574,7 +593,7 @@ export async function mineStorefrontAsins(
     await sleep(150);
   }
 
-  return Array.from(asins);
+  return { asins: Array.from(asins), throttled: false };
 }
 
 /**

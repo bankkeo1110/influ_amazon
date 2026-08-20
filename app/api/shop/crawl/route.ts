@@ -81,6 +81,12 @@ export async function POST(req: NextRequest) {
           countShopVideos(hit.handle, maxVideoPages),
         ]);
 
+        // A soft block carries no count — skip the write rather than store a zero.
+        if (videos.throttled) {
+          failures.push({ handle: hit.handle, error: "Amazon throttled the video count" });
+          return;
+        }
+
         // Fall back to the search-result title, then to the handle itself.
         const fromTitle = hit.title.replace(/[’']s Amazon Page\s*$/i, "").trim();
         const resolvedName = name || fromTitle || hit.handle;

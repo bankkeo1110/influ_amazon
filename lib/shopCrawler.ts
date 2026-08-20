@@ -150,9 +150,20 @@ type Ctx = {
   maxVideoPages: number;
 };
 
-/** Stores a newly found handle, fetching its name and video count first. */
-async function saveHandles(ctx: Ctx, hits: ShopHit[], sourceQuery: string): Promise<void> {
-  if (hits.length === 0) return;
+/**
+ * Stores newly found handles, fetching each one's name and video count first.
+ *
+ * Returns true if Amazon soft-blocked any of the count requests. A throttled
+ * response carries no video count, and writing it as zero would overwrite a real
+ * number with a wrong one, so those rows are left for a later run instead.
+ */
+async function saveHandles(
+  ctx: Ctx,
+  hits: ShopHit[],
+  sourceQuery: string
+): Promise<boolean> {
+  if (hits.length === 0) return false;
+  let throttled = false;
 
   const existing = await prisma.amazonShop.findMany({
     where: { handle: { in: hits.map((h) => h.handle) } },
@@ -168,6 +179,14 @@ async function saveHandles(ctx: Ctx, hits: ShopHit[], sourceQuery: string): Prom
         fetchShopName(hit.handle),
         countShopVideos(hit.handle, ctx.maxVideoPages),
       ]);
+
+      if (videos.throttled) {
+        // Drop it from `seen` too, so a later run rediscovers and stores it.
+        throttled = true;
+        ctx.seen.delete(hit.handle.toLowerCase());
+        return;
+      }
+
       const fromTitle = hit.title.replace(/[’']s Amazon Page\s*$/i, "").trim();
 
       const data = {
@@ -188,6 +207,8 @@ async function saveHandles(ctx: Ctx, hits: ShopHit[], sourceQuery: string): Prom
       // A storefront that will not load must not stop a crawl that runs for hours.
     }
   });
+
+  return throttled;
 }
 
 /**
@@ -282,7 +303,7 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
   let blockStreak = 0;
 
   /** Pulls ASINs from storefronts that have not been mined yet. */
-  const refillAsins = async (): Promise<boolean> => {
+  const refillAsins = async (): Promise<boolean | "throttled"> => {
     const shops = await prisma.amazonShop.findMany({
       where: { asinsMined: false },
       orderBy: { videoCount: "desc" }, // creators with videos carry the most products
@@ -294,10 +315,15 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
       ctx.note = `mining products from ${shop.handle}`;
       await report(null);
       try {
-        const asins = await mineStorefrontAsins(shop.handle, ASIN_PAGES_PER_SHOP);
+        const { asins, throttled } = await mineStorefrontAsins(
+          shop.handle,
+          ASIN_PAGES_PER_SHOP
+        );
         for (const asin of asins) {
           if (!visitedAsins.has(asin)) asinQueue.push(asin);
         }
+        // Leave the storefront unmined so a later run comes back to it.
+        if (throttled) return "throttled";
       } catch {
         // Skip a storefront whose feed will not load.
       }
@@ -308,11 +334,32 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
     return true;
   };
 
+  /** Waits out a soft block, doubling each time; returns false once it gives up. */
+  const backOff = async (reason: string): Promise<boolean> => {
+    blockStreak++;
+    if (blockStreak > MAX_BLOCK_STREAK) {
+      ctx.note = `Amazon kept throttling (${reason}) — stopping so it can cool off`;
+      await report(null);
+      return false;
+    }
+    const pause = Math.min(BLOCK_BACKOFF_MS * 2 ** (blockStreak - 1), MAX_BACKOFF_MS);
+    ctx.note = `Amazon throttled (${reason}) — pausing ${Math.round(
+      pause / 1000
+    )}s (attempt ${blockStreak})`;
+    await report(null);
+    await sleep(pause);
+    return true;
+  };
+
   while (ctx.seen.size < target) {
     if (!(await stillRunning())) return;
 
     if (asinQueue.length === 0) {
       const refilled = await refillAsins();
+      if (refilled === "throttled") {
+        if (!(await backOff("storefront feeds"))) break;
+        continue;
+      }
       if (!refilled) {
         ctx.note = "frontier exhausted — every known storefront has been mined";
         break;
@@ -335,16 +382,8 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
     // product with no creators. Re-queue those ASINs and wait it out, doubling
     // the pause each time, instead of burning the queue against a wall.
     if (found.some((r) => r.blocked)) {
-      blockStreak++;
       asinQueue.unshift(...batch);
-      const pause = Math.min(BLOCK_BACKOFF_MS * 2 ** (blockStreak - 1), MAX_BACKOFF_MS);
-      ctx.note = `Amazon bot check — pausing ${Math.round(pause / 1000)}s (attempt ${blockStreak})`;
-      await report(null);
-      await sleep(pause);
-      if (blockStreak >= MAX_BLOCK_STREAK) {
-        ctx.note = "Amazon kept serving its bot check — stopping so it can cool off";
-        break;
-      }
+      if (!(await backOff("product bot check"))) break;
       continue;
     }
 
@@ -360,7 +399,10 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
       fresh.push({ handle, url: shopUrl(handle), title: "" });
     }
 
-    if (fresh.length > 0) await saveHandles(ctx, fresh, "amazon-frontier");
+    if (fresh.length > 0) {
+      const wasThrottled = await saveHandles(ctx, fresh, "amazon-frontier");
+      if (wasThrottled && !(await backOff("video counts"))) break;
+    }
 
     ctx.note = `${ctx.productsRead} products read · ${asinQueue.length} queued`;
     await report(null);
