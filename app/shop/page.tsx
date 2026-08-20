@@ -35,6 +35,19 @@ type CrawlResult = {
   warning?: string;
 };
 
+type CrawlJob = {
+  id: string;
+  baseQuery: string;
+  target: number;
+  status: "running" | "done" | "stopped" | "error";
+  discovered: number;
+  saved: number;
+  queriesRun: number;
+  currentQuery: string | null;
+  note: string | null;
+  error: string | null;
+};
+
 const PROVIDERS = [
   { value: "auto", label: "Auto" },
   { value: "google", label: "Google API" },
@@ -75,6 +88,10 @@ export default function ShopPage() {
   const [crawling, setCrawling] = useState(false);
   const [crawlError, setCrawlError] = useState("");
   const [crawlResult, setCrawlResult] = useState<CrawlResult | null>(null);
+
+  // ── Deep-crawl job state ──────────────────────────────────────────────────
+  const [target, setTarget] = useState(1000);
+  const [job, setJob] = useState<CrawlJob | null>(null);
 
   // Debounce the filter box so typing does not fire a request per keystroke.
   useEffect(() => {
@@ -152,6 +169,57 @@ export default function ShopPage() {
     }
   }
 
+  // Poll the job while it runs, refreshing the table as rows land.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function poll() {
+      try {
+        const res = await fetch("/api/shop/job");
+        const data = await res.json();
+        if (cancelled) return;
+        setJob(data.job ?? null);
+        if (data.job?.status === "running") await load();
+      } catch {
+        /* transient — the next tick retries */
+      }
+    }
+
+    poll();
+    const id = setInterval(poll, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+    // `load` is intentionally omitted: it changes on every paging/sort tweak and
+    // would restart the interval each time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleDeepCrawl() {
+    setCrawlError("");
+    setCrawlResult(null);
+    try {
+      const res = await fetch("/api/shop/job", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, target, maxVideoPages }),
+      });
+      const data = await res.json();
+      if (data.error) setCrawlError(data.error);
+      if (data.job) setJob(data.job);
+    } catch {
+      setCrawlError("Could not start the crawl.");
+    }
+  }
+
+  async function handleStopCrawl() {
+    const res = await fetch("/api/shop/job", { method: "DELETE" });
+    const data = await res.json();
+    setJob(data.job ?? null);
+    await load();
+  }
+
   async function handleClear() {
     if (!confirm(`Delete all ${total} crawled shops?`)) return;
     await fetch("/api/shop", { method: "DELETE" });
@@ -167,8 +235,8 @@ export default function ShopPage() {
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-gray-900">Shop</h1>
         <p className="text-gray-400 text-sm mt-1">
-          Amazon influencer storefronts discovered from a{" "}
-          <code className="text-gray-500">site:</code> search, with their video counts.
+          Amazon influencer storefronts and their video counts, discovered from a{" "}
+          <code className="text-gray-500">site:</code> search and by crawling Amazon.
         </p>
       </div>
 
@@ -267,6 +335,87 @@ export default function ShopPage() {
               </span>
             )}
           </p>
+        )}
+      </div>
+
+      {/* ── Deep crawl ──────────────────────────────────────────────────── */}
+      <div className="bg-white rounded-2xl border border-gray-100 p-6 shadow-sm mb-5">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-sm font-bold text-gray-900">Deep crawl</h2>
+            <p className="text-xs text-gray-400 mt-1 max-w-xl">
+              Search engines only index a few dozen of these pages, so this seeds from
+              search and then walks Amazon itself — storefront videos give product ASINs,
+              and each product page credits the creators who filmed it. Runs in the
+              background; leave the page if you like.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-bold text-gray-400 uppercase tracking-widest whitespace-nowrap">
+              Target
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={5000}
+              value={target}
+              onChange={(e) => setTarget(Math.max(1, Number(e.target.value)))}
+              disabled={job?.status === "running"}
+              className="w-20 border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-center disabled:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-900"
+            />
+            {job?.status === "running" ? (
+              <button
+                onClick={handleStopCrawl}
+                className="bg-white border border-gray-200 hover:border-red-300 hover:text-red-500 text-gray-600 px-4 py-2 rounded-xl text-sm font-medium transition-colors"
+              >
+                Stop
+              </button>
+            ) : (
+              <button
+                onClick={handleDeepCrawl}
+                className="bg-gray-900 hover:bg-gray-700 text-white px-5 py-2 rounded-xl text-sm font-medium transition-colors whitespace-nowrap"
+              >
+                Start deep crawl
+              </button>
+            )}
+          </div>
+        </div>
+
+        {job && (
+          <div className="mt-4">
+            <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gray-900 transition-all duration-500"
+                style={{
+                  width: `${Math.min(100, (job.discovered / Math.max(1, job.target)) * 100)}%`,
+                }}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3 mt-2 flex-wrap text-xs text-gray-400">
+              <span>
+                <span className="font-medium text-gray-900">{job.discovered}</span> /{" "}
+                {job.target} storefronts · {job.saved} saved · {job.queriesRun} queries ·{" "}
+                <span
+                  className={
+                    job.status === "running"
+                      ? "text-gray-900"
+                      : job.status === "error"
+                        ? "text-red-500"
+                        : "text-gray-400"
+                  }
+                >
+                  {job.status}
+                </span>
+              </span>
+              {job.note && <span className="truncate max-w-md">{job.note}</span>}
+            </div>
+            {job.currentQuery && job.status === "running" && (
+              <p className="mt-1 text-xs text-gray-300 font-mono truncate">
+                {job.currentQuery}
+              </p>
+            )}
+            {job.error && <p className="mt-1 text-xs text-red-500">{job.error}</p>}
+          </div>
         )}
       </div>
 

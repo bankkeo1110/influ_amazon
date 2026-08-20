@@ -539,6 +539,66 @@ export async function countShopVideos(
   return { count: ids.size, capped: true };
 }
 
+// ── Discovery inside Amazon itself ────────────────────────────────────────────
+
+/**
+ * Product ASINs featured in a storefront's video feed.
+ *
+ * These are the bridge to other creators: a product page lists every influencer
+ * who filmed a video about that product, so one storefront's products lead
+ * outward to creators no search engine has indexed.
+ */
+export async function mineStorefrontAsins(
+  handle: string,
+  maxPages: number
+): Promise<string[]> {
+  const asins = new Set<string>();
+  let token: string | null = null;
+
+  for (let page = 0; page < maxPages; page++) {
+    let url = `https://www.amazon.com/shop/${encodeURIComponent(handle)}/getItems?viewScope=Video`;
+    if (token) url += `&pageToken=${encodeURIComponent(token)}`;
+
+    const res = await httpRequest(url);
+    if (res.status !== 200) break;
+
+    // The feed HTML-escapes its JSON, so match the data-asin attribute instead.
+    for (const m of Array.from(res.body.matchAll(/amzn1\.asin\.([A-Z0-9]{10})/g))) {
+      asins.add(m[1]);
+    }
+
+    const more = res.body.match(/name="shouldLoadMoreFlag" value="([^"]*)"/)?.[1];
+    const next = res.body.match(/name="pageToken" value="([^"]*)"/)?.[1] ?? "";
+    if (more !== "true" || !next || next === token) break;
+    token = next;
+    await sleep(150);
+  }
+
+  return Array.from(asins);
+}
+
+/**
+ * Creator handles credited on a product's detail page.
+ *
+ * The influencer-video rail sits roughly 900 KB into a ~2 MB page, and capping
+ * the read misses most of it — measured yield drops from ~2.2 creators per
+ * product to ~0.2 — so this deliberately reads the page in full.
+ */
+export async function fetchProductCreators(asin: string): Promise<string[]> {
+  const res = await httpRequest(`https://www.amazon.com/dp/${encodeURIComponent(asin)}`, {
+    timeoutMs: 45_000,
+  });
+  if (res.status !== 200) return [];
+
+  const handles = new Set<string>();
+  for (const m of Array.from(res.body.matchAll(/\/shop\/([A-Za-z0-9._-]+)/g))) {
+    const handle = m[1];
+    if (RESERVED_HANDLES.has(handle.toLowerCase())) continue;
+    handles.add(handle);
+  }
+  return Array.from(handles);
+}
+
 // ── Small concurrency helper ──────────────────────────────────────────────────
 
 export async function mapWithConcurrency<T, R>(

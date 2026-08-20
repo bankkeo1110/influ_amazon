@@ -123,10 +123,27 @@ model AmazonShop {
   videoCount    Int      @default(0)
   countCapped   Boolean  @default(false) // true when the video walk hit maxVideoPages
   sourceQuery   String?
+  asinsMined    Boolean  @default(false) // product ASINs already pulled from this storefront
   lastCrawledAt DateTime @default(now())
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   @@index([videoCount])
   @@index([name])
+}
+
+model ShopCrawlJob {
+  id           String    @id @default(cuid())
+  baseQuery    String
+  target       Int
+  status       String    @default("running") // running | done | stopped | error
+  discovered   Int       @default(0) // unique handles seen across all query variants
+  saved        Int       @default(0) // rows written to AmazonShop
+  queriesRun   Int       @default(0)
+  currentQuery String?
+  note         String?   @db.Text // last provider/throttle message, shown live in the UI
+  error        String?   @db.Text
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  updatedAt    DateTime  @updatedAt
 }
