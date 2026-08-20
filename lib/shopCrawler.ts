@@ -111,7 +111,21 @@ function makePool(): Slot[] {
 
 const FRESH_FOR_MS = 24 * 60 * 60 * 1000;
 const ENRICH_CONCURRENCY = 4;
-const PRODUCT_CONCURRENCY = 3;
+const PRODUCT_CONCURRENCY = 2;
+
+/**
+ * Gap between product batches. Amazon starts serving its bot check somewhere
+ * past a few hundred detail pages, so this trades a slower crawl for one that
+ * keeps running.
+ */
+const PRODUCT_PACE_MS = 1_200;
+
+/** First pause after a bot check; doubles per consecutive hit. */
+const BLOCK_BACKOFF_MS = 60_000;
+const MAX_BACKOFF_MS = 15 * 60_000;
+
+/** Give up (leaving the job resumable) rather than hammer a wall forever. */
+const MAX_BLOCK_STREAK = 6;
 
 /** Search variants tried up front to seed the frontier when the table is thin. */
 const SEED_QUERIES = 6;
@@ -265,6 +279,7 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
   // ── 2. Walk the Amazon frontier ────────────────────────────────────────────
   const visitedAsins = new Set<string>();
   const asinQueue: string[] = [];
+  let blockStreak = 0;
 
   /** Pulls ASINs from storefronts that have not been mined yet. */
   const refillAsins = async (): Promise<boolean> => {
@@ -305,20 +320,40 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
       continue;
     }
 
-    const batch = asinQueue.splice(0, PRODUCT_CONCURRENCY);
-    batch.forEach((a) => visitedAsins.add(a));
+    const concurrency = blockStreak > 0 ? 1 : PRODUCT_CONCURRENCY;
+    const batch = asinQueue.splice(0, concurrency);
 
-    const found = await mapWithConcurrency(batch, PRODUCT_CONCURRENCY, async (asin) => {
+    const found = await mapWithConcurrency(batch, concurrency, async (asin) => {
       try {
         return await fetchProductCreators(asin);
       } catch {
-        return [];
+        return { blocked: false as const, handles: [] };
       }
     });
+
+    // Amazon answers its bot check with HTTP 200, so a blocked page looks like a
+    // product with no creators. Re-queue those ASINs and wait it out, doubling
+    // the pause each time, instead of burning the queue against a wall.
+    if (found.some((r) => r.blocked)) {
+      blockStreak++;
+      asinQueue.unshift(...batch);
+      const pause = Math.min(BLOCK_BACKOFF_MS * 2 ** (blockStreak - 1), MAX_BACKOFF_MS);
+      ctx.note = `Amazon bot check — pausing ${Math.round(pause / 1000)}s (attempt ${blockStreak})`;
+      await report(null);
+      await sleep(pause);
+      if (blockStreak >= MAX_BLOCK_STREAK) {
+        ctx.note = "Amazon kept serving its bot check — stopping so it can cool off";
+        break;
+      }
+      continue;
+    }
+
+    blockStreak = 0;
+    batch.forEach((a) => visitedAsins.add(a));
     ctx.productsRead += batch.length;
 
     const fresh: ShopHit[] = [];
-    for (const handle of found.flat()) {
+    for (const handle of found.flatMap((r) => r.handles)) {
       const keyed = handle.toLowerCase();
       if (ctx.seen.has(keyed)) continue;
       ctx.seen.add(keyed);
@@ -329,7 +364,7 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
 
     ctx.note = `${ctx.productsRead} products read · ${asinQueue.length} queued`;
     await report(null);
-    await sleep(400);
+    await sleep(PRODUCT_PACE_MS);
   }
 
   const finalStatus = (await stillRunning()) ? "done" : "stopped";

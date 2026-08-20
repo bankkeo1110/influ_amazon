@@ -578,17 +578,35 @@ export async function mineStorefrontAsins(
 }
 
 /**
+ * Amazon serves its bot check with HTTP 200 and a ~4 KB body, so status alone
+ * cannot tell it apart from a real page. Left undetected it reads as "this
+ * product simply has no creators", and a crawl happily burns its whole queue
+ * finding nothing.
+ */
+export function isBotCheck(body: string): boolean {
+  return (
+    body.length < 100_000 &&
+    /captcha|Robot Check|automated access|api-services-support@amazon\.com/i.test(body)
+  );
+}
+
+export type ProductCreators =
+  | { blocked: false; handles: string[] }
+  | { blocked: true; handles: [] };
+
+/**
  * Creator handles credited on a product's detail page.
  *
  * The influencer-video rail sits roughly 900 KB into a ~2 MB page, and capping
  * the read misses most of it — measured yield drops from ~2.2 creators per
  * product to ~0.2 — so this deliberately reads the page in full.
  */
-export async function fetchProductCreators(asin: string): Promise<string[]> {
+export async function fetchProductCreators(asin: string): Promise<ProductCreators> {
   const res = await httpRequest(`https://www.amazon.com/dp/${encodeURIComponent(asin)}`, {
     timeoutMs: 45_000,
   });
-  if (res.status !== 200) return [];
+  if (res.status !== 200) return { blocked: false, handles: [] };
+  if (isBotCheck(res.body)) return { blocked: true, handles: [] };
 
   const handles = new Set<string>();
   for (const m of Array.from(res.body.matchAll(/\/shop\/([A-Za-z0-9._-]+)/g))) {
@@ -596,7 +614,7 @@ export async function fetchProductCreators(asin: string): Promise<string[]> {
     if (RESERVED_HANDLES.has(handle.toLowerCase())) continue;
     handles.add(handle);
   }
-  return Array.from(handles);
+  return { blocked: false, handles: Array.from(handles) };
 }
 
 // ── Small concurrency helper ──────────────────────────────────────────────────
