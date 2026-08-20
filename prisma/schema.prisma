@@ -140,10 +140,20 @@ model ShopCrawlJob {
   discovered   Int       @default(0) // unique handles seen across all query variants
   saved        Int       @default(0) // rows written to AmazonShop
   queriesRun   Int       @default(0)
+  cycles       Int       @default(0) // cool-off/resume rounds survived
+  phase        String    @default("crawling") // crawling | cooling
+  resumeAt     DateTime? // when a cooling job wakes up again
   currentQuery String?
   note         String?   @db.Text // last provider/throttle message, shown live in the UI
   error        String?   @db.Text
   startedAt    DateTime  @default(now())
   finishedAt   DateTime?
   updatedAt    DateTime  @updatedAt
+}
+
+/** Single-row settings for the Shop crawler (id is always "default"). */
+model CrawlSetting {
+  id        String   @id @default("default")
+  proxies   String   @default("") @db.Text // one proxy URL per line, tried in order
+  updatedAt DateTime @updatedAt
 }

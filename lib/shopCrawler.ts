@@ -23,8 +23,10 @@ import {
   hasGoogleKeys,
   mapWithConcurrency,
   mineStorefrontAsins,
+  parseProxies,
   searchShops,
   shopUrl,
+  type Proxy,
   type ResolvedProvider,
   type ShopHit,
 } from "@/lib/amazonShop";
@@ -124,8 +126,18 @@ const PRODUCT_PACE_MS = 1_200;
 const BLOCK_BACKOFF_MS = 60_000;
 const MAX_BACKOFF_MS = 15 * 60_000;
 
-/** Give up (leaving the job resumable) rather than hammer a wall forever. */
-const MAX_BLOCK_STREAK = 6;
+/** Short backoffs to try before falling back to a long cool-off. */
+const MAX_BLOCK_STREAK = 4;
+
+/**
+ * How long to stand down once the short backoffs are exhausted. Amazon's block
+ * outlives minutes-long pauses, so the crawl sleeps properly and resumes rather
+ * than trying to take the whole target in one sitting.
+ */
+const COOL_OFF_MS = 45 * 60_000;
+
+/** Cool-off rounds before calling it: ~18h of wall clock at 45m each. */
+const MAX_CYCLES = 24;
 
 /** Search variants tried up front to seed the frontier when the table is thin. */
 const SEED_QUERIES = 6;
@@ -148,7 +160,29 @@ type Ctx = {
   productsRead: number;
   note: string;
   maxVideoPages: number;
+  /** Proxy pool; a null entry means "go direct from this machine". */
+  proxies: (Proxy | null)[];
+  proxyIndex: number;
 };
+
+/** The exit that a proxy is currently routed through, or null for direct. */
+function currentProxy(ctx: Ctx): Proxy | null {
+  return ctx.proxies[ctx.proxyIndex] ?? null;
+}
+
+function proxyLabel(ctx: Ctx): string {
+  return currentProxy(ctx)?.label ?? "direct";
+}
+
+/**
+ * Moves to the next exit. Returns false once every exit has been tried since the
+ * last success, which is the signal to cool off rather than keep rotating.
+ */
+function rotateProxy(ctx: Ctx): boolean {
+  if (ctx.proxies.length < 2) return false;
+  ctx.proxyIndex = (ctx.proxyIndex + 1) % ctx.proxies.length;
+  return true;
+}
 
 /**
  * Stores newly found handles, fetching each one's name and video count first.
@@ -176,8 +210,8 @@ async function saveHandles(
 
     try {
       const [name, videos] = await Promise.all([
-        fetchShopName(hit.handle),
-        countShopVideos(hit.handle, ctx.maxVideoPages),
+        fetchShopName(hit.handle, currentProxy(ctx)),
+        countShopVideos(hit.handle, ctx.maxVideoPages, currentProxy(ctx)),
       ]);
 
       if (videos.throttled) {
@@ -234,7 +268,21 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
     productsRead: 0,
     note: "",
     maxVideoPages,
+    proxies: [null],
+    proxyIndex: 0,
   };
+
+  // Proxies are optional. With none configured the pool is just [direct], and
+  // rotateProxy() reports "nothing to switch to" so the crawl falls straight
+  // through to backing off.
+  const settings = await prisma.crawlSetting
+    .findUnique({ where: { id: "default" } })
+    .catch(() => null);
+  const configured = parseProxies(settings?.proxies ?? "");
+  if (configured.length > 0) {
+    ctx.proxies = [...configured, null]; // direct stays in rotation as a last exit
+    ctx.note = `${configured.length} proxy exit(s) + direct`;
+  }
 
   // Handles already stored count toward the target — a re-run tops up.
   for (const row of await prisma.amazonShop.findMany({ select: { handle: true } })) {
@@ -301,6 +349,8 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
   const visitedAsins = new Set<string>();
   const asinQueue: string[] = [];
   let blockStreak = 0;
+  let triedExits = 0;
+  let cycles = 0;
 
   /** Pulls ASINs from storefronts that have not been mined yet. */
   const refillAsins = async (): Promise<boolean | "throttled"> => {
@@ -317,7 +367,8 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
       try {
         const { asins, throttled } = await mineStorefrontAsins(
           shop.handle,
-          ASIN_PAGES_PER_SHOP
+          ASIN_PAGES_PER_SHOP,
+          currentProxy(ctx)
         );
         for (const asin of asins) {
           if (!visitedAsins.has(asin)) asinQueue.push(asin);
@@ -334,20 +385,62 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
     return true;
   };
 
-  /** Waits out a soft block, doubling each time; returns false once it gives up. */
+  /**
+   * Handles a soft block. Order of escalation:
+   *   1. switch to the next proxy — a different exit IP is usually not blocked
+   *   2. short backoffs, doubling
+   *   3. a long cool-off, then resume from the top
+   * Returns false only once the cool-off budget is spent.
+   */
   const backOff = async (reason: string): Promise<boolean> => {
+    if (rotateProxy(ctx)) {
+      triedExits++;
+      // Only stop rotating once every exit has failed since the last success.
+      if (triedExits < ctx.proxies.length) {
+        ctx.note = `${reason} blocked — switching to ${proxyLabel(ctx)}`;
+        await report(null);
+        await sleep(2_000);
+        return true;
+      }
+    }
+
     blockStreak++;
-    if (blockStreak > MAX_BLOCK_STREAK) {
-      ctx.note = `Amazon kept throttling (${reason}) — stopping so it can cool off`;
+    if (blockStreak <= MAX_BLOCK_STREAK) {
+      const pause = Math.min(BLOCK_BACKOFF_MS * 2 ** (blockStreak - 1), MAX_BACKOFF_MS);
+      ctx.note = `Amazon throttled (${reason}) — pausing ${Math.round(
+        pause / 1000
+      )}s (attempt ${blockStreak})`;
+      await report(null);
+      await sleep(pause);
+      triedExits = 0;
+      return true;
+    }
+
+    // Short pauses are not enough — stand down properly and come back.
+    cycles++;
+    if (cycles > MAX_CYCLES) {
+      ctx.note = `Amazon still throttling after ${MAX_CYCLES} cool-offs — stopping`;
       await report(null);
       return false;
     }
-    const pause = Math.min(BLOCK_BACKOFF_MS * 2 ** (blockStreak - 1), MAX_BACKOFF_MS);
-    ctx.note = `Amazon throttled (${reason}) — pausing ${Math.round(
-      pause / 1000
-    )}s (attempt ${blockStreak})`;
-    await report(null);
-    await sleep(pause);
+
+    const resumeAt = new Date(Date.now() + COOL_OFF_MS);
+    ctx.note = `Amazon throttled (${reason}) — cooling off ${Math.round(
+      COOL_OFF_MS / 60_000
+    )}m, resuming ${resumeAt.toISOString().slice(11, 16)} UTC (cycle ${cycles})`;
+    await prisma.shopCrawlJob
+      .update({
+        where: { id: jobId },
+        data: { phase: "cooling", cycles, resumeAt, note: ctx.note },
+      })
+      .catch(() => {});
+    await sleep(COOL_OFF_MS);
+
+    blockStreak = 0;
+    triedExits = 0;
+    await prisma.shopCrawlJob
+      .update({ where: { id: jobId }, data: { phase: "crawling", resumeAt: null } })
+      .catch(() => {});
     return true;
   };
 
@@ -372,9 +465,11 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
 
     const found = await mapWithConcurrency(batch, concurrency, async (asin) => {
       try {
-        return await fetchProductCreators(asin);
+        return await fetchProductCreators(asin, currentProxy(ctx));
       } catch {
-        return { blocked: false as const, handles: [] };
+        // A dead proxy or dropped connection throws. Treat it as blocked so the
+        // crawl rotates exits rather than reading it as "no creators here".
+        return { blocked: true as const, handles: [] as string[] };
       }
     });
 
@@ -387,7 +482,9 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
       continue;
     }
 
+    // A clean batch means this exit is healthy again — restart both counters.
     blockStreak = 0;
+    triedExits = 0;
     batch.forEach((a) => visitedAsins.add(a));
     ctx.productsRead += batch.length;
 

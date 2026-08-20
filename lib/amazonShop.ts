@@ -18,6 +18,9 @@
  */
 
 import https from "node:https";
+import net from "node:net";
+import type stream from "node:stream";
+import tls from "node:tls";
 import zlib from "node:zlib";
 
 const UA =
@@ -28,6 +31,119 @@ const BROWSER_HEADERS: Record<string, string> = {
   "Accept-Language": "en-US,en;q=0.9",
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 };
+
+// ── Proxies ───────────────────────────────────────────────────────────────────
+
+export type Proxy = {
+  /** Original line, for display. */
+  label: string;
+  host: string;
+  port: number;
+  auth?: string;
+};
+
+/**
+ * Parses one proxy per line. Accepts `host:port`, `http://host:port`, and
+ * `http://user:pass@host:port`; blank lines and `#` comments are skipped.
+ * Only HTTP/HTTPS proxies work here — SOCKS would need a different transport.
+ */
+export function parseProxies(raw: string): Proxy[] {
+  const out: Proxy[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+    try {
+      const url = new URL(withScheme);
+      if (!url.hostname || !url.port) continue;
+      const auth =
+        url.username || url.password
+          ? Buffer.from(
+              `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`
+            ).toString("base64")
+          : undefined;
+      // Hide credentials in anything user-facing.
+      out.push({
+        label: `${url.hostname}:${url.port}`,
+        host: url.hostname,
+        port: Number(url.port),
+        auth,
+      });
+    } catch {
+      // Ignore an unparseable line rather than failing the whole list.
+    }
+  }
+  return out;
+}
+
+/**
+ * Opens a TLS connection to `host` through an HTTP proxy using CONNECT.
+ *
+ * Written by hand rather than pulling in https-proxy-agent: it is ~30 lines and
+ * this repo has no proxy dependency to build on.
+ */
+function openProxyTunnel(
+  proxy: Proxy,
+  host: string,
+  port: number,
+  timeoutMs: number
+): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: proxy.host, port: proxy.port });
+    socket.setTimeout(timeoutMs, () => socket.destroy(new Error("Proxy connect timed out")));
+
+    socket.once("error", reject);
+    socket.once("connect", () => {
+      const lines = [
+        `CONNECT ${host}:${port} HTTP/1.1`,
+        `Host: ${host}:${port}`,
+        ...(proxy.auth ? [`Proxy-Authorization: Basic ${proxy.auth}`] : []),
+        "\r\n",
+      ];
+      socket.write(lines.join("\r\n"));
+    });
+
+    let banner = "";
+    const onData = (chunk: Buffer) => {
+      banner += chunk.toString("latin1");
+      if (!banner.includes("\r\n\r\n")) return;
+
+      socket.removeListener("data", onData);
+      const status = Number(banner.match(/^HTTP\/1\.[01] (\d{3})/)?.[1] ?? 0);
+      if (status !== 200) {
+        socket.destroy();
+        reject(new Error(`Proxy ${proxy.label} refused CONNECT (${status || "no status"})`));
+        return;
+      }
+
+      // Hand back the raw tunnel; TLS is layered on later, inside
+      // createConnection, so the socket is in a connecting state when the agent
+      // receives it and its handshake events still fire.
+      socket.setTimeout(0);
+      socket.removeListener("error", reject);
+      resolve(socket);
+    };
+    socket.on("data", onData);
+  });
+}
+
+/**
+ * An https.Agent whose connections are CONNECT tunnels through `proxy`.
+ *
+ * The override must be on the agent instance — Node only consults
+ * `createConnection` there, so passing it in the request options (or setting
+ * `agent: false`) silently connects direct instead.
+ */
+function proxyAgent(tunnel: net.Socket, servername: string): https.Agent {
+  const agent = new https.Agent({ keepAlive: false });
+
+  (
+    agent as unknown as { createConnection: () => stream.Duplex }
+  ).createConnection = () => tls.connect({ socket: tunnel, servername });
+
+  return agent;
+}
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────
 
@@ -41,6 +157,8 @@ type HttpOptions = {
   /** Stop reading and drop the connection once this many bytes have arrived. */
   maxBytes?: number;
   timeoutMs?: number;
+  /** Route through this HTTP proxy via CONNECT; omit to go direct. */
+  proxy?: Proxy | null;
 };
 
 /**
@@ -52,17 +170,32 @@ type HttpOptions = {
  * to drop it. Doing our own request also lets us destroy a response mid-stream
  * (see maxBytes) without leaving a half-read body pinning a pooled connection.
  */
-function httpRequest(rawUrl: string, options: HttpOptions = {}): Promise<HttpResponse> {
+async function httpRequest(
+  rawUrl: string,
+  options: HttpOptions = {}
+): Promise<HttpResponse> {
   const {
     method = "GET",
     headers = BROWSER_HEADERS,
     form,
     maxBytes = Infinity,
     timeoutMs = 30_000,
+    proxy = null,
   } = options;
 
+  const target = new URL(rawUrl);
+  // Establish the CONNECT tunnel up front so createConnection stays synchronous.
+  const tunnel = proxy
+    ? await openProxyTunnel(
+        proxy,
+        target.hostname,
+        Number(target.port) || 443,
+        timeoutMs
+      )
+    : null;
+
   return new Promise((resolve, reject) => {
-    const url = new URL(rawUrl);
+    const url = target;
     const payload = form ? Buffer.from(form.toString()) : null;
     let settled = false;
 
@@ -83,6 +216,10 @@ function httpRequest(rawUrl: string, options: HttpOptions = {}): Promise<HttpRes
         host: url.hostname,
         path: url.pathname + url.search,
         method,
+        // createConnection has to live on the agent: passing it (or agent:false)
+        // in the request options lets Node build its own agent, which quietly
+        // ignores it and connects direct.
+        ...(tunnel ? { agent: proxyAgent(tunnel, url.hostname) } : {}),
         headers: {
           // No Accept-Encoding on purpose: Amazon's getItems endpoint answers any
           // compressed request with HTTP 400, and undici's fetch always sends one.
@@ -474,13 +611,20 @@ export async function searchShops(
 // ── Enrichment: storefront name ───────────────────────────────────────────────
 
 /** Reads only the first ~120 KB of the storefront page — the head is all we need. */
-async function fetchHead(url: string, limit = 120_000): Promise<string> {
-  const res = await httpRequest(url, { maxBytes: limit });
+async function fetchHead(
+  url: string,
+  limit = 120_000,
+  proxy?: Proxy | null
+): Promise<string> {
+  const res = await httpRequest(url, { maxBytes: limit, proxy });
   return res.status === 200 ? res.body : "";
 }
 
-export async function fetchShopName(handle: string): Promise<string | null> {
-  const html = await fetchHead(shopUrl(handle));
+export async function fetchShopName(
+  handle: string,
+  proxy?: Proxy | null
+): Promise<string | null> {
+  const html = await fetchHead(shopUrl(handle), 120_000, proxy);
   if (!html) return null;
 
   const raw =
@@ -517,7 +661,8 @@ function isThrottleStatus(status: number): boolean {
  */
 export async function countShopVideos(
   handle: string,
-  maxPages: number
+  maxPages: number,
+  proxy?: Proxy | null
 ): Promise<VideoCount> {
   const ids = new Set<string>();
   let token: string | null = null;
@@ -526,7 +671,7 @@ export async function countShopVideos(
     let url = `https://www.amazon.com/shop/${encodeURIComponent(handle)}/getItems?viewScope=Video`;
     if (token) url += `&pageToken=${encodeURIComponent(token)}`;
 
-    const res = await httpRequest(url);
+    const res = await httpRequest(url, { proxy });
     // A soft block is not an empty storefront — say so, so the caller can skip
     // the write and retry later rather than saving a bogus zero.
     if (isThrottleStatus(res.status)) {
@@ -565,7 +710,8 @@ export async function countShopVideos(
  */
 export async function mineStorefrontAsins(
   handle: string,
-  maxPages: number
+  maxPages: number,
+  proxy?: Proxy | null
 ): Promise<{ asins: string[]; throttled: boolean }> {
   const asins = new Set<string>();
   let token: string | null = null;
@@ -574,7 +720,7 @@ export async function mineStorefrontAsins(
     let url = `https://www.amazon.com/shop/${encodeURIComponent(handle)}/getItems?viewScope=Video`;
     if (token) url += `&pageToken=${encodeURIComponent(token)}`;
 
-    const res = await httpRequest(url);
+    const res = await httpRequest(url, { proxy });
     // Soft block — report it so the caller does not mark this storefront mined.
     if (isThrottleStatus(res.status)) {
       return { asins: Array.from(asins), throttled: true };
@@ -620,9 +766,13 @@ export type ProductCreators =
  * the read misses most of it — measured yield drops from ~2.2 creators per
  * product to ~0.2 — so this deliberately reads the page in full.
  */
-export async function fetchProductCreators(asin: string): Promise<ProductCreators> {
+export async function fetchProductCreators(
+  asin: string,
+  proxy?: Proxy | null
+): Promise<ProductCreators> {
   const res = await httpRequest(`https://www.amazon.com/dp/${encodeURIComponent(asin)}`, {
     timeoutMs: 45_000,
+    proxy,
   });
   if (res.status !== 200) return { blocked: false, handles: [] };
   if (isBotCheck(res.body)) return { blocked: true, handles: [] };

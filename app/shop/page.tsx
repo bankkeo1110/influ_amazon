@@ -43,10 +43,22 @@ type CrawlJob = {
   discovered: number;
   saved: number;
   queriesRun: number;
+  cycles: number;
+  phase: "crawling" | "cooling";
+  resumeAt: string | null;
   currentQuery: string | null;
   note: string | null;
   error: string | null;
 };
+
+/** "in 42m" / "in 1h 06m" for a cooling job's wake-up time. */
+function untilLabel(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 0) return "any moment";
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `in ${mins}m`;
+  return `in ${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, "0")}m`;
+}
 
 const PROVIDERS = [
   { value: "auto", label: "Auto" },
@@ -92,6 +104,9 @@ export default function ShopPage() {
   // ── Deep-crawl job state ──────────────────────────────────────────────────
   const [target, setTarget] = useState(1000);
   const [job, setJob] = useState<CrawlJob | null>(null);
+  const [proxies, setProxies] = useState("");
+  const [proxyStatus, setProxyStatus] = useState("");
+  const [showProxies, setShowProxies] = useState(false);
 
   // Debounce the filter box so typing does not fire a request per keystroke.
   useEffect(() => {
@@ -195,6 +210,37 @@ export default function ShopPage() {
     // would restart the interval each time.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    fetch("/api/shop/proxies")
+      .then((r) => r.json())
+      .then((d) => {
+        if (typeof d.proxies === "string") setProxies(d.proxies);
+        if (d.valid) setProxyStatus(`${d.valid} proxy exit${d.valid === 1 ? "" : "s"} saved`);
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handleSaveProxies() {
+    setProxyStatus("Saving…");
+    try {
+      const res = await fetch("/api/shop/proxies", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ proxies }),
+      });
+      const data = await res.json();
+      setProxyStatus(
+        data.error
+          ? data.error
+          : data.valid === 0
+            ? "Saved — no usable lines, the crawl will run direct"
+            : `Saved — ${data.valid} exit${data.valid === 1 ? "" : "s"}: ${data.labels.join(", ")}`
+      );
+    } catch {
+      setProxyStatus("Could not save the proxy list.");
+    }
+  }
 
   async function handleDeepCrawl() {
     setCrawlError("");
@@ -394,17 +440,22 @@ export default function ShopPage() {
             <div className="flex items-center justify-between gap-3 mt-2 flex-wrap text-xs text-gray-400">
               <span>
                 <span className="font-medium text-gray-900">{job.discovered}</span> /{" "}
-                {job.target} storefronts · {job.saved} saved · {job.queriesRun} queries ·{" "}
+                {job.target} storefronts · {job.saved} saved · {job.queriesRun} queries
+                {job.cycles > 0 && ` · ${job.cycles} cool-off${job.cycles === 1 ? "" : "s"}`} ·{" "}
                 <span
                   className={
-                    job.status === "running"
-                      ? "text-gray-900"
-                      : job.status === "error"
-                        ? "text-red-500"
-                        : "text-gray-400"
+                    job.phase === "cooling" && job.status === "running"
+                      ? "text-amber-600"
+                      : job.status === "running"
+                        ? "text-gray-900"
+                        : job.status === "error"
+                          ? "text-red-500"
+                          : "text-gray-400"
                   }
                 >
-                  {job.status}
+                  {job.status === "running" && job.phase === "cooling"
+                    ? `sleeping${job.resumeAt ? ` · resumes ${untilLabel(job.resumeAt)}` : ""}`
+                    : job.status}
                 </span>
               </span>
               {job.note && <span className="truncate max-w-md">{job.note}</span>}
@@ -417,6 +468,44 @@ export default function ShopPage() {
             {job.error && <p className="mt-1 text-xs text-red-500">{job.error}</p>}
           </div>
         )}
+
+        {/* ── Proxies (optional) ──────────────────────────────────────────── */}
+        <div className="mt-4 pt-4 border-t border-gray-100">
+          <button
+            onClick={() => setShowProxies((v) => !v)}
+            className="text-xs font-bold text-gray-400 uppercase tracking-widest hover:text-gray-700 transition-colors"
+          >
+            {showProxies ? "▾" : "▸"} Proxies (optional)
+          </button>
+
+          {showProxies && (
+            <div className="mt-3">
+              <p className="text-xs text-gray-400 mb-2 max-w-xl">
+                One per line — <code className="text-gray-500">host:port</code> or{" "}
+                <code className="text-gray-500">http://user:pass@host:port</code>. When Amazon
+                throttles, the crawl switches to the next exit before it falls back to
+                sleeping. Leave empty to run direct. HTTP proxies only, not SOCKS.
+              </p>
+              <textarea
+                value={proxies}
+                onChange={(e) => setProxies(e.target.value)}
+                rows={4}
+                spellCheck={false}
+                placeholder={"198.51.100.10:8080\nhttp://user:pass@203.0.113.5:3128"}
+                className="w-full border border-gray-200 rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-gray-900"
+              />
+              <div className="flex items-center gap-3 mt-2">
+                <button
+                  onClick={handleSaveProxies}
+                  className="bg-white border border-gray-200 hover:border-gray-400 text-gray-700 px-4 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                >
+                  Save proxies
+                </button>
+                {proxyStatus && <span className="text-xs text-gray-400">{proxyStatus}</span>}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* ── Table toolbar ───────────────────────────────────────────────── */}
