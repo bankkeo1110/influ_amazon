@@ -142,6 +142,13 @@ const MAX_CYCLES = 24;
 /** Search variants tried up front to seed the frontier when the table is thin. */
 const SEED_QUERIES = 6;
 
+/**
+ * Above this many stored storefronts the frontier feeds itself, and seeding adds
+ * nothing: the engines only ever return the same handful of indexed pages, and
+ * hitting them just invites the rate limit. Skip search entirely at that point.
+ */
+const SEED_SKIP_ABOVE = 200;
+
 /** Storefront video-feed pages mined for ASINs per storefront. */
 const ASIN_PAGES_PER_SHOP = 3;
 
@@ -321,8 +328,14 @@ export async function runDeepCrawl(options: DeepCrawlOptions): Promise<void> {
     return soonest;
   };
 
-  const variants = expandQueries(baseQuery);
-  for (const query of variants.slice(0, SEED_QUERIES)) {
+  const variants =
+    ctx.seen.size >= SEED_SKIP_ABOVE ? [] : expandQueries(baseQuery).slice(0, SEED_QUERIES);
+  if (variants.length === 0 && ctx.seen.size > 0) {
+    ctx.note = `${ctx.seen.size} storefronts already stored — skipping search, going straight to the Amazon frontier`;
+    await report(null);
+  }
+
+  for (const query of variants) {
     if (ctx.seen.size >= target) break;
     if (!(await stillRunning())) return;
 

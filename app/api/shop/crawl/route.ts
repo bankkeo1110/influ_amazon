@@ -35,11 +35,38 @@ export async function POST(req: NextRequest) {
     const maxVideoPages = Math.min(50, Math.max(1, body.maxVideoPages ?? 10));
     const refresh = body.refresh === true;
 
-    const { provider, hits, attempts } = await searchShops(
-      query,
-      maxResults,
-      body.provider ?? "auto"
-    );
+    let provider: string;
+    let hits: Awaited<ReturnType<typeof searchShops>>["hits"];
+    let attempts: Awaited<ReturnType<typeof searchShops>>["attempts"];
+
+    try {
+      ({ provider, hits, attempts } = await searchShops(
+        query,
+        maxResults,
+        body.provider ?? "auto"
+      ));
+    } catch (err) {
+      // Every backend being unavailable at once is a normal, transient outcome —
+      // Bing occasionally serves an empty page while DuckDuckGo is mid rate-limit.
+      // Report it as an empty crawl with guidance, not a 500.
+      const known = await prisma.amazonShop.count();
+      return NextResponse.json({
+        provider: "none",
+        query,
+        found: 0,
+        added: 0,
+        updated: 0,
+        skipped: 0,
+        failed: 0,
+        warning:
+          `Every search backend was unavailable just now (${
+            err instanceof Error ? err.message.replace(/^No search backend returned results — /, "") : "unknown"
+          }). Search engines only ever index a few dozen of these pages` +
+          (known > 0
+            ? ` — Deep crawl below does not depend on them and can keep growing the ${known} storefronts you already have.`
+            : ". Try again in a few minutes."),
+      });
+    }
 
     if (hits.length === 0) {
       return NextResponse.json({

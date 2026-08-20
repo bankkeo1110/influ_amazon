@@ -367,7 +367,12 @@ export default function ShopPage() {
         {crawlError && (
           <p className="mt-4 text-sm text-red-500 bg-red-50 rounded-xl px-3 py-2">{crawlError}</p>
         )}
-        {crawlResult && (
+        {crawlResult && crawlResult.found === 0 && crawlResult.warning && (
+          <p className="mt-4 text-sm text-amber-700 bg-amber-50 rounded-xl px-3 py-2">
+            {crawlResult.warning}
+          </p>
+        )}
+        {crawlResult && !(crawlResult.found === 0 && crawlResult.warning) && (
           <p className="mt-4 text-sm text-gray-500 bg-gray-50 rounded-xl px-3 py-2">
             <span className="font-medium text-gray-900">{crawlResult.provider}</span> returned{" "}
             {crawlResult.found} storefront{crawlResult.found === 1 ? "" : "s"} — {crawlResult.added}{" "}
