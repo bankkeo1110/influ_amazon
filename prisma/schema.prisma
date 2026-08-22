@@ -157,3 +157,15 @@ model CrawlSetting {
   proxies   String   @default("") @db.Text // one proxy URL per line, tried in order
   updatedAt DateTime @updatedAt
 }
+
+// ─── Amazon Profile Manager ──────────────────────────────────────────────────
+
+model AmazonProfile {
+  id        String   @id @default(cuid())
+  mail      String
+  ip        String   @default("")
+  shopUrl   String   @default("")
+  status    String   @default("Step 1") // Step 1 | Submitted L1 | Submitted L2 | Submitted L3 | Rejected | Approved
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

@@ -128,7 +128,10 @@ const sections: NavSection[] = [
   {
     title: "Amazon",
     labelColor: "#F59E0B",
-    items: [{ href: "/shop", label: "Shop", Icon: IconBag }],
+    items: [
+      { href: "/shop", label: "Shop", Icon: IconBag },
+      { href: "/amazon/profiles", label: "Manage Profiles", Icon: IconList },
+    ],
   },
 ];
 
