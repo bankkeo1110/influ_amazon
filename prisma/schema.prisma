@@ -158,6 +158,45 @@ model CrawlSetting {
   updatedAt DateTime @updatedAt
 }
 
+// ─── Math Fun: Midterm Exam ──────────────────────────────────────────────────
+
+model ExamSet {
+  id          String         @id @default(cuid())
+  title       String // "Đề 1", "Đề 2", ...
+  subject     String         @default("Toán")
+  grade       Int            @default(5)
+  totalPoints Float          @default(10)
+  createdAt   DateTime       @default(now())
+  questions   ExamQuestion[]
+  attempts    ExamAttempt[]
+}
+
+model ExamQuestion {
+  id            String   @id @default(cuid())
+  examSetId     String
+  examSet       ExamSet  @relation(fields: [examSetId], references: [id], onDelete: Cascade)
+  order         Int
+  section       String // "trac_nghiem" | "tu_luan"
+  groupLabel    String // "Câu 1", "Câu 2a", ... — groups sub-parts under one heading in the UI
+  prompt        String   @db.Text
+  visual        Json? // e.g. { type: "pie", parts: 8, shaded: 3 } for the shaded-fraction question
+  answerType    String // "mcq" | "number" | "symbol" | "text" | "list"
+  options       Json? // for mcq: [{ key: "A", text: "3/8" }, ...]
+  correctAnswer String   @db.Text
+  points        Float
+}
+
+model ExamAttempt {
+  id          String    @id @default(cuid())
+  examSetId   String
+  examSet     ExamSet   @relation(fields: [examSetId], references: [id], onDelete: Cascade)
+  answers     Json?
+  score       Float?
+  maxScore    Float
+  startedAt   DateTime  @default(now())
+  submittedAt DateTime?
+}
+
 // ─── Amazon Profile Manager ──────────────────────────────────────────────────
 
 model AmazonProfile {

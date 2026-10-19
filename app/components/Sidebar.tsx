@@ -75,6 +75,16 @@ function IconBag() {
   );
 }
 
+function IconGraduationCap() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M1 5 7 2l6 3-6 3-6-3Z" />
+      <path d="M4 6.5V10c0 .8 1.3 1.5 3 1.5s3-.7 3-1.5V6.5" />
+      <path d="M12.5 5.5v3" />
+    </svg>
+  );
+}
+
 function IconChevronLeft() {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -132,6 +142,11 @@ const sections: NavSection[] = [
       { href: "/shop", label: "Shop", Icon: IconBag },
       { href: "/amazon/profiles", label: "Manage Profiles", Icon: IconList },
     ],
+  },
+  {
+    title: "Math Fun",
+    labelColor: "#10B981",
+    items: [{ href: "/exam", label: "Thi giữa kì", Icon: IconGraduationCap }],
   },
 ];
 
