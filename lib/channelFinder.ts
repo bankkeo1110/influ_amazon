@@ -1,11 +1,14 @@
-import { abOpen, abEval, abScroll } from "@/lib/agentBrowser";
+import { abOpen, abEval, abScroll, DEFAULT_SESSION } from "@/lib/agentBrowser";
 import { fetchTranscriptEvents } from "@/lib/youtubeTranscript";
 
 // How many verified (avg length under the cap) channels we try to collect per query.
 const TARGET_RESULTS = 50;
 // Upper bound on how many candidate channels we'll actually visit/verify — bounds the
-// worst-case runtime, since verification is one real page load per channel.
-const MAX_VERIFY_ATTEMPTS = 130;
+// worst-case runtime, since verification is page loads per channel. Raised from the
+// original 130: running several browser sessions in parallel (see CHECK_CONCURRENCY)
+// means this budget now costs proportionally less wall-clock time than before, so it
+// can afford to look at more candidates in pursuit of TARGET_RESULTS.
+const MAX_VERIFY_ATTEMPTS = 150;
 // "Faceless, quick review" cutoff. A floor excludes Shorts-only channels (a few-second
 // average isn't "a quick review", it's a different content format).
 const MAX_AVG_SECONDS = 4 * 60;
@@ -13,6 +16,21 @@ const MIN_AVG_SECONDS = 45;
 // Scrolling the search results is cheap (no network round trip, just more DOM), so we
 // scroll generously to build a big enough candidate pool before the expensive part.
 const SCROLL_ROUNDS = 15;
+// How many candidates get verified at once, each on its own independent agent-browser
+// session (= its own real Chrome tab, own cookies). agent-browser supports this
+// natively (--session <name> per call); the Amazon Shop crawler's pacing/backoff
+// helpers were the reminder that this scraper never actually used it, and was running
+// every candidate through one tab, one at a time, the entire time. Kept modest rather
+// than maxed out — more parallel tabs means more simultaneous requests against
+// YouTube from this one IP, and getting rate-limited mid-run would cost more time than
+// serial verification ever did.
+const CHECK_CONCURRENCY = 4;
+// Small per-worker pause between its own checks — the same "don't hammer the target"
+// instinct as the Shop crawler's PRODUCT_PACE_MS, scaled down since this is reading
+// public channel pages rather than triggering Amazon's bot check.
+const WORKER_PACE_MS = 300;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Words describing the *style* the user wants rather than the topic. YouTube's search
 // matches literally — "faceless" pulls in "how to start a faceless channel" tutorials
@@ -122,7 +140,9 @@ const READ_CHANNEL_RENDERERS_SCRIPT = `
   })();
 `;
 
-// sp=EgIQAg%3D%3D restricts YouTube search results to the "Channel" filter.
+// sp=EgIQAg%3D%3D restricts YouTube search results to the "Channel" filter. Runs on the
+// shared default session — this only happens once or twice per query, so there's
+// nothing worth parallelizing here (unlike the per-candidate verification below).
 async function searchOnce(searchTerm: string): Promise<RawChannel[]> {
   const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchTerm)}&sp=EgIQAg%3D%3D`;
   await abOpen(url);
@@ -173,43 +193,68 @@ function extractVideoId(href: string): string | null {
   return m ? m[1] : null;
 }
 
-// Visits the channel's Videos tab and reads the duration badges shown on the video grid
-// — no need to open individual videos, YouTube already renders "8:23" etc. on the
-// thumbnails themselves. Also grabs the first video's ID, to use as the sample for the
-// audio-quality check.
-async function getChannelVideoStats(href: string): Promise<ChannelVideoStats> {
-  await abOpen(`https://www.youtube.com${href}/videos`);
-
-  const raw = await abEval<{ href: string | null; duration: string | null }[]>(`
-    (function() {
-      var items = document.querySelectorAll('ytd-rich-item-renderer');
-      var out = [];
-      items.forEach(function(el) {
-        var link = el.querySelector('a[href^="/watch?v="]');
-        var badge = el.querySelector('.ytBadgeShapeText');
-        out.push({
-          href: link ? link.getAttribute('href') : null,
-          duration: badge ? badge.textContent.trim() : null,
-        });
+const READ_VIDEO_GRID_SCRIPT = `
+  (function() {
+    var items = document.querySelectorAll('ytd-rich-item-renderer');
+    var out = [];
+    items.forEach(function(el) {
+      var link = el.querySelector('a[href^="/watch?v="]');
+      var badge = el.querySelector('.ytBadgeShapeText');
+      out.push({
+        href: link ? link.getAttribute('href') : null,
+        duration: badge ? badge.textContent.trim() : null,
       });
-      return out.slice(0, 12);
-    })();
-  `);
+    });
+    return out.slice(0, 12);
+  })();
+`;
 
-  const durationRe = /^\d{1,2}:\d{2}(:\d{2})?$/;
-  const seconds = raw
-    .map((r) => r.duration)
-    .filter((d): d is string => !!d && durationRe.test(d))
-    .map(parseDurationToSeconds)
-    .filter((n) => n > 0);
+/**
+ * Visits the channel's Videos tab and reads the duration badges shown on the video grid
+ * — no need to open individual videos, YouTube already renders "8:23" etc. on the
+ * thumbnails themselves. Also grabs the first video's ID, to use as the sample for the
+ * audio-quality check.
+ *
+ * A channel that showed up in channel search has at least one subscriber and was
+ * indexed — it finding zero grid items on the first read is more likely a render-timing
+ * hiccup (or a transient block) than the channel genuinely having no videos. One retry
+ * after a short pause avoids recording that as "reject", echoing the Shop crawler's
+ * rule that a throttled response must never be written down as a real zero.
+ */
+async function getChannelVideoStats(href: string, session: string): Promise<ChannelVideoStats> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await abOpen(`https://www.youtube.com${href}/videos`, 30000, session);
+    const raw = await abEval<{ href: string | null; duration: string | null }[]>(
+      READ_VIDEO_GRID_SCRIPT,
+      20000,
+      session
+    );
 
-  const avgLengthSec =
-    seconds.length > 0 ? Math.round(seconds.reduce((a, b) => a + b, 0) / seconds.length) : null;
+    if (raw.length === 0) {
+      if (attempt === 0) {
+        await sleep(1200);
+        continue;
+      }
+      return { avgLengthSec: null, sampleVideoId: null };
+    }
 
-  const firstHref = raw.find((r) => r.href)?.href ?? null;
-  const sampleVideoId = firstHref ? extractVideoId(firstHref) : null;
+    const durationRe = /^\d{1,2}:\d{2}(:\d{2})?$/;
+    const seconds = raw
+      .map((r) => r.duration)
+      .filter((d): d is string => !!d && durationRe.test(d))
+      .map(parseDurationToSeconds)
+      .filter((n) => n > 0);
 
-  return { avgLengthSec, sampleVideoId };
+    const avgLengthSec =
+      seconds.length > 0 ? Math.round(seconds.reduce((a, b) => a + b, 0) / seconds.length) : null;
+
+    const firstHref = raw.find((r) => r.href)?.href ?? null;
+    const sampleVideoId = firstHref ? extractVideoId(firstHref) : null;
+
+    return { avgLengthSec, sampleVideoId };
+  }
+
+  return { avgLengthSec: null, sampleVideoId: null };
 }
 
 // Segments that are pure non-speech markers ("[Music]", "(Music)") or contain musical
@@ -225,9 +270,10 @@ type ContentQuality = { clearAudio: boolean; isEnglish: boolean | null };
 
 async function checkContentQuality(
   videoId: string,
-  fallbackText: string
+  fallbackText: string,
+  session: string
 ): Promise<ContentQuality> {
-  const result = await fetchTranscriptEvents(videoId).catch((err) => {
+  const result = await fetchTranscriptEvents(videoId, session).catch((err) => {
     console.error(`[channel-finder] transcript check failed for ${videoId}:`, err);
     return null;
   });
@@ -261,15 +307,47 @@ async function checkContentQuality(
   return { clearAudio, isEnglish };
 }
 
+async function verifyCandidate(c: RawChannel, session: string): Promise<FoundChannel | null> {
+  if (!c.href) return null;
+
+  const stats = await getChannelVideoStats(c.href, session).catch((err) => {
+    console.error(`[channel-finder] failed to measure ${c.href}:`, err);
+    return { avgLengthSec: null, sampleVideoId: null } as ChannelVideoStats;
+  });
+
+  const { avgLengthSec, sampleVideoId } = stats;
+  if (avgLengthSec === null || avgLengthSec < MIN_AVG_SECONDS || avgLengthSec >= MAX_AVG_SECONDS) {
+    return null;
+  }
+  if (!sampleVideoId) return null;
+
+  const quality = await checkContentQuality(
+    sampleVideoId,
+    `${c.name ?? ""} ${c.description ?? ""}`,
+    session
+  );
+  if (!quality.clearAudio || quality.isEnglish === false) return null;
+
+  return {
+    name: c.name ?? c.handle ?? c.href,
+    handle: c.handle,
+    url: `https://www.youtube.com${c.href}`,
+    thumbnailUrl: c.thumbnailUrl,
+    subscriberText: c.subscriberText,
+    avgLengthSec,
+    description: c.description,
+  };
+}
+
 /**
- * Searches YouTube for channels matching `query`, then visits each candidate's Videos
- * tab (in relevance order) to measure its average video length, keeping only the ones
- * under MAX_AVG_SECONDS — a proxy for "quick faceless review" content. Survivors then
- * get a second, heavier check: a sample video's transcript/caption language is read to
- * reject non-English channels and background-music-dominated audio. Candidates that are
- * obviously non-English by name/description alone are dropped before any of that, to
- * avoid wasting page loads on them. Keeps going until TARGET_RESULTS or the
- * candidate/attempt budget runs out.
+ * Searches YouTube for channels matching `query`, then verifies candidates (in
+ * relevance order, several at a time — see CHECK_CONCURRENCY) against the Videos tab:
+ * average video length under MAX_AVG_SECONDS (a proxy for "quick faceless review"
+ * content), then a sample video's transcript/caption language to reject non-English
+ * channels and background-music-dominated audio. Candidates that are obviously
+ * non-English by name/description alone are dropped before any of that, to avoid
+ * wasting page loads on them. Keeps going until TARGET_RESULTS or the candidate/attempt
+ * budget runs out.
  */
 export async function findChannels(query: string): Promise<FoundChannel[]> {
   const allCandidates = await searchCandidateChannels(query);
@@ -281,39 +359,43 @@ export async function findChannels(query: string): Promise<FoundChannel[]> {
     (c) => looksEnglishFromText(`${c.name ?? ""} ${c.description ?? ""}`) !== false
   );
 
-  const results: FoundChannel[] = [];
+  const found: { index: number; channel: FoundChannel }[] = [];
+  let resultCount = 0;
+  let cursor = 0;
   let attempts = 0;
 
-  for (const c of candidates) {
-    if (results.length >= TARGET_RESULTS || attempts >= MAX_VERIFY_ATTEMPTS) break;
-    if (!c.href) continue;
-    attempts++;
+  const worker = async (workerId: number) => {
+    // Each worker gets its own real Chrome tab (own cookies, own navigation) so these
+    // run truly in parallel rather than queueing behind one shared tab.
+    const session = `${DEFAULT_SESSION}-cf-${workerId}`;
+    while (resultCount < TARGET_RESULTS && attempts < MAX_VERIFY_ATTEMPTS && cursor < candidates.length) {
+      const index = cursor++;
+      const c = candidates[index];
+      if (!c.href) continue;
+      attempts++;
 
-    const stats = await getChannelVideoStats(c.href).catch((err) => {
-      console.error(`[channel-finder] failed to measure ${c.href}:`, err);
-      return { avgLengthSec: null, sampleVideoId: null } as ChannelVideoStats;
-    });
+      const channel = await verifyCandidate(c, session).catch((err) => {
+        console.error(`[channel-finder] worker ${workerId} failed on ${c.href}:`, err);
+        return null;
+      });
 
-    const { avgLengthSec, sampleVideoId } = stats;
-    if (avgLengthSec === null || avgLengthSec < MIN_AVG_SECONDS || avgLengthSec >= MAX_AVG_SECONDS) {
-      continue;
+      if (channel) {
+        found.push({ index, channel });
+        resultCount++;
+      }
+
+      await sleep(WORKER_PACE_MS);
     }
+  };
 
-    if (!sampleVideoId) continue;
+  const workerCount = Math.max(1, Math.min(CHECK_CONCURRENCY, candidates.length));
+  await Promise.all(Array.from({ length: workerCount }, (_, i) => worker(i)));
 
-    const quality = await checkContentQuality(sampleVideoId, `${c.name ?? ""} ${c.description ?? ""}`);
-    if (!quality.clearAudio || quality.isEnglish === false) continue;
+  // Workers finish out of order — sort back to YouTube's own relevance ranking.
+  found.sort((a, b) => a.index - b.index);
 
-    results.push({
-      name: c.name ?? c.handle ?? c.href,
-      handle: c.handle,
-      url: `https://www.youtube.com${c.href}`,
-      thumbnailUrl: c.thumbnailUrl,
-      subscriberText: c.subscriberText,
-      avgLengthSec,
-      description: c.description,
-    });
-  }
-
-  return results;
+  // Worker tabs are deliberately left open (same reasoning as the single shared
+  // session elsewhere in this app): a fixed, small number of them (CHECK_CONCURRENCY)
+  // stays warm for the next search instead of paying relaunch cost on every run.
+  return found.slice(0, TARGET_RESULTS).map((f) => f.channel);
 }

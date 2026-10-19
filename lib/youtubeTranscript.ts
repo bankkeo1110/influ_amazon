@@ -1,4 +1,4 @@
-import { abOpen, abEval } from "@/lib/agentBrowser";
+import { abOpen, abEval, DEFAULT_SESSION } from "@/lib/agentBrowser";
 
 export type TimedTextEvent = {
   tStartMs: number;
@@ -92,9 +92,12 @@ const TRANSCRIPT_SCRIPT = `
 // InnerTube endpoints from the server. Those endpoints now require a live session/POT
 // token that a bare server-side fetch can't produce — this reads the same "Show
 // transcript" panel a human would open, which needs no such token.
-export async function fetchTranscriptEvents(videoId: string): Promise<TranscriptResult> {
+export async function fetchTranscriptEvents(
+  videoId: string,
+  session: string = DEFAULT_SESSION
+): Promise<TranscriptResult> {
   try {
-    await abOpen(`https://www.youtube.com/watch?v=${videoId}&hl=en`);
+    await abOpen(`https://www.youtube.com/watch?v=${videoId}&hl=en`, 30000, session);
   } catch (err) {
     console.error(`[transcript] failed to open watch page for ${videoId}:`, err);
     return { ok: false, reason: "upstream_error", languageCodes: [] };
@@ -104,7 +107,8 @@ export async function fetchTranscriptEvents(videoId: string): Promise<Transcript
     playability: string | null;
     trackCount: number;
     languageCodes: string[];
-  }>(`
+  }>(
+    `
     (function() {
       var pr = window.ytInitialPlayerResponse;
       var tracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
@@ -114,7 +118,10 @@ export async function fetchTranscriptEvents(videoId: string): Promise<Transcript
         languageCodes: tracks.map(function(t) { return t.languageCode || ''; }).filter(Boolean),
       };
     })();
-  `).catch(() => ({ playability: null, trackCount: 0, languageCodes: [] as string[] }));
+  `,
+    20000,
+    session
+  ).catch(() => ({ playability: null, trackCount: 0, languageCodes: [] as string[] }));
 
   if (state.playability && state.playability !== "OK") {
     console.error(`[transcript] playabilityStatus=${state.playability} for ${videoId}`);
@@ -127,7 +134,8 @@ export async function fetchTranscriptEvents(videoId: string): Promise<Transcript
 
   const result = await abEval<{ clicked: boolean; segments: RawTranscriptSegment[] }>(
     TRANSCRIPT_SCRIPT,
-    30000
+    30000,
+    session
   ).catch((err) => {
     console.error(`[transcript] failed to read transcript panel for ${videoId}:`, err);
     return { clicked: false, segments: [] as RawTranscriptSegment[] };
